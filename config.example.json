@@ -1,6 +1,7 @@
 {
   "telegram_token": "YOUR_TELEGRAM_BOT_TOKEN",
   "zernio_api_key": "YOUR_ZERNIO_API_KEY",
+  "zernio_api_base_url": "https://api.zernio.com",
   "default_thumbnail": "thumbnails/default.jpg",
   "post_to": ["instagram", "tiktok"],
   "captions": [

@@ -1,5 +1,5 @@
-# TODO: Replace API endpoint and field names with actual
-# Zernio API docs from your account dashboard
+# TODO: Verify the upload path, headers, and field names against the
+# Zernio API docs from your account dashboard.
 """
 uploader.py — Zernio API Uploader
 
@@ -10,11 +10,52 @@ import os
 import logging
 import requests
 from typing import Dict, Any
+from urllib.parse import urlsplit
 
 from caption import load_config
 
 # Setup logger
 logger = logging.getLogger(__name__)
+
+DEFAULT_ZERNIO_API_BASE_URL = "https://api.zernio.com"
+UPLOAD_ENDPOINT_PATH = "/v1/upload"
+
+
+def build_upload_url(base_url: str | None) -> str:
+    """Build the upload URL from the configured API base URL.
+
+    A host-only base URL gets the default ``/v1/upload`` route. For APIs that
+    expose a versioned base URL (for example ``.../v1``), only ``/upload`` is
+    appended. A value that already ends in ``/upload`` is treated as a complete
+    upload endpoint for compatibility with existing configurations.
+    """
+    value = base_url.strip() if isinstance(base_url, str) else ""
+    if not value:
+        value = DEFAULT_ZERNIO_API_BASE_URL
+
+    if any(character.isspace() for character in value):
+        raise ValueError("the URL must not contain spaces")
+
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid URL ({exc})") from exc
+
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("use a complete http:// or https:// URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URLs must not contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("do not include a query string or fragment")
+
+    normalized = value.rstrip("/")
+    path = parsed.path.rstrip("/")
+    if path.endswith("/upload"):
+        return normalized
+    if path.endswith("/v1"):
+        return f"{normalized}/upload"
+    return f"{normalized}{UPLOAD_ENDPOINT_PATH}"
 
 
 def upload_video(video_path: str, caption: str, thumbnail_path: str = None) -> Dict[str, Any]:
@@ -78,9 +119,18 @@ def upload_video(video_path: str, caption: str, thumbnail_path: str = None) -> D
     if not thumbnail_exists:
         logger.warning(f"Thumbnail not found at {thumbnail_path}, uploading without thumbnail")
 
-    # Zernio API endpoint - TODO: Update with real endpoint
-    # Placeholder URL - replace with actual from Zernio dashboard
-    api_url = "https://api.zernio.com/v1/upload"
+    # Resolve the API base URL configured in the dashboard. Keeping this in
+    # config.json means the endpoint can be changed without editing source.
+    try:
+        api_url = build_upload_url(config.get("zernio_api_base_url"))
+    except ValueError as e:
+        error_message = f"Invalid Zernio API base URL: {e}"
+        return {
+            "success": False,
+            "message": error_message,
+            "instagram": f"failed: {error_message}",
+            "tiktok": f"failed: {error_message}",
+        }
 
     # Results tracking
     results = {}
