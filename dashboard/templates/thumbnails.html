@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+
+{% block title %}Thumbnails - AutoRepost Pipeline{% endblock %}
+{% block page_title %}Thumbnails{% endblock %}
+
+{% block content %}
+<!-- Current Thumbnail Preview -->
+<div class="mb-8">
+    <h3 class="text-lg font-semibold mb-4">Current Default Thumbnail</h3>
+    <div class="bg-[#1e293b] rounded-xl border border-[#334155] p-6">
+        <div class="flex flex-col md:flex-row gap-6 items-start">
+            <!-- Image Preview -->
+            <div class="w-full md:w-80">
+                <div class="aspect-video bg-[#0f172a] rounded-lg border border-[#334155] overflow-hidden flex items-center justify-center">
+                    {% if current_default %}
+                        {% set thumb_filename = current_default.split('/')[-1] %}
+                        <img 
+                            src="/thumbnails/file/{{ thumb_filename }}" 
+                            alt="Current default thumbnail"
+                            class="w-full h-full object-cover"
+                            onerror="this.style.display='none'; this.nextElementSibling.style.display='flex';"
+                        >
+                        <div class="hidden w-full h-full items-center justify-center flex-col gap-2 text-slate-500 p-4 text-center">
+                            <span class="text-3xl">🖼️</span>
+                            <p class="text-sm">Thumbnail not found</p>
+                            <p class="text-xs font-mono">{{ current_default }}</p>
+                        </div>
+                    {% else %}
+                        <div class="w-full h-full flex items-center justify-center flex-col gap-2 text-slate-500">
+                            <span class="text-3xl">🖼️</span>
+                            <p class="text-sm">No default thumbnail set</p>
+                        </div>
+                    {% endif %}
+                </div>
+            </div>
+            
+            <!-- Info -->
+            <div class="flex-1">
+                <h4 class="font-medium mb-2">Current Default Thumbnail</h4>
+                <p class="font-mono text-sm bg-[#0f172a] px-3 py-2 rounded-lg border border-[#334155] text-slate-300">
+                    {{ current_default }}
+                </p>
+                <p class="text-sm text-slate-400 mt-3">
+                    This thumbnail will be applied to every video post to Instagram & TikTok via Zernio API.
+                </p>
+                <div class="mt-4 flex gap-2">
+                    <span class="inline-flex items-center px-3 py-1 rounded-full text-xs bg-blue-900/50 text-blue-300 border border-blue-700">
+                        Used for all uploads
+                    </span>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Upload New Thumbnail -->
+<div class="mb-8">
+    <h3 class="text-lg font-semibold mb-4">Upload New Thumbnail</h3>
+    <div class="bg-[#1e293b] rounded-xl border border-[#334155] p-6">
+        <form action="/thumbnails/upload" method="POST" enctype="multipart/form-data" class="flex flex-col md:flex-row gap-4 items-end">
+            <div class="flex-1">
+                <label class="block text-sm font-medium text-slate-300 mb-2">
+                    Select Image (JPG, PNG, WEBP only)
+                </label>
+                <input 
+                    type="file" 
+                    name="thumbnail" 
+                    accept=".jpg,.jpeg,.png,.webp"
+                    required
+                    class="w-full px-4 py-3 bg-[#0f172a] border border-[#334155] rounded-lg text-slate-300 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:bg-blue-600 file:text-white file:text-sm hover:file:bg-blue-700 file:transition-colors"
+                >
+                <p class="text-xs text-slate-500 mt-2">Max recommended size: 1080x1080 or 1080x1920 for best results</p>
+            </div>
+            <button 
+                type="submit"
+                class="px-6 py-3 bg-green-600 hover:bg-green-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2 whitespace-nowrap"
+            >
+                <span>⬆️</span> Upload
+            </button>
+        </form>
+    </div>
+</div>
+
+<!-- All Thumbnails Grid -->
+<div>
+    <div class="flex items-center justify-between mb-4">
+        <h3 class="text-lg font-semibold">All Thumbnails</h3>
+        <span class="text-sm text-slate-400">{{ thumbnails|length }} image(s)</span>
+    </div>
+
+    {% if thumbnails %}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+            {% for thumb in thumbnails %}
+            <div class="bg-[#1e293b] rounded-xl border overflow-hidden transition-all hover:border-blue-500/50 {% if thumb.is_default %}border-blue-500 ring-1 ring-blue-500{% else %}border-[#334155]{% endif %}">
+                <!-- Image -->
+                <div class="aspect-video bg-[#0f172a] overflow-hidden relative">
+                    <img 
+                        src="/thumbnails/file/{{ thumb.filename }}" 
+                        alt="{{ thumb.filename }}"
+                        class="w-full h-full object-cover hover:scale-105 transition-transform duration-300"
+                        loading="lazy"
+                    >
+                    {% if thumb.is_default %}
+                        <div class="absolute top-2 left-2 px-2 py-1 bg-blue-600 text-white text-xs rounded-full font-medium">
+                            Default
+                        </div>
+                    {% endif %}
+                </div>
+
+                <!-- Info & Actions -->
+                <div class="p-4">
+                    <p class="font-mono text-sm text-slate-300 truncate" title="{{ thumb.filename }}">
+                        {{ thumb.filename }}
+                    </p>
+                    <div class="flex items-center justify-between mt-2 text-xs text-slate-500">
+                        <span>{{ (thumb.size / 1024) | round(1) }} KB</span>
+                        <span>{{ thumb.mtime }}</span>
+                    </div>
+
+                    <!-- Set as Default Button -->
+                    <form action="/thumbnails/set" method="POST" class="mt-3">
+                        <input type="hidden" name="filename" value="{{ thumb.filename }}">
+                        {% if thumb.is_default %}
+                            <button 
+                                type="button" 
+                                disabled
+                                class="w-full py-2 px-4 bg-[#334155] text-slate-400 rounded-lg text-sm font-medium cursor-not-allowed"
+                            >
+                                ✅ Current Default
+                            </button>
+                        {% else %}
+                            <button 
+                                type="submit"
+                                class="w-full py-2 px-4 bg-blue-600 hover:bg-blue-700 text-white rounded-lg text-sm font-medium transition-colors"
+                            >
+                                Set as Default
+                            </button>
+                        {% endif %}
+                    </form>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="bg-[#1e293b] rounded-xl border border-[#334155] border-dashed p-12 text-center">
+            <div class="flex flex-col items-center gap-3 text-slate-500">
+                <span class="text-4xl">🖼️</span>
+                <h4 class="font-medium text-slate-300">No thumbnails yet</h4>
+                <p class="text-sm max-w-md">Upload a JPG, PNG, or WEBP image above. It will be used as the default thumbnail for all your reposts.</p>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<!-- Tips -->
+<div class="mt-8 bg-[#1e293b] rounded-xl border border-[#334155] p-6">
+    <h4 class="font-medium mb-3 flex items-center gap-2">
+        <span>💡</span> Thumbnail Tips
+    </h4>
+    <ul class="text-sm text-slate-400 space-y-2 list-disc list-inside">
+        <li>Use high-quality images: 1080x1080 (square) or 1080x1920 (vertical) works best for Instagram & TikTok</li>
+        <li>Keep file size under 5MB for faster uploads</li>
+        <li>Supported formats: JPG, JPEG, PNG, WEBP</li>
+        <li>Thumbnails are stored in <code class="bg-[#0f172a] px-1.5 py-0.5 rounded">thumbnails/</code> folder (gitignored)</li>
+        <li>Set a default thumbnail to ensure every post has a cover image</li>
+    </ul>
+</div>
+{% endblock %}

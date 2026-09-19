@@ -1,0 +1,53 @@
+# AutoRepost Pipeline - Ignored files
+
+# Downloaded videos (large, temporary)
+downloads/*
+!downloads/.gitkeep
+
+# Logs (runtime)
+logs/*
+!logs/.gitkeep
+
+# Thumbnails - ignore actual images but keep folder
+thumbnails/*.jpg
+thumbnails/*.jpeg
+thumbnails/*.png
+thumbnails/*.webp
+!thumbnails/.gitkeep
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+*.egg
+*.whl
+dist/
+build/
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment variables & secrets
+.env
+config.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# yt-dlp cache
+*.info.json
+*.part
+*.ytdl

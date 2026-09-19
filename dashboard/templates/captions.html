@@ -1,0 +1,155 @@
+{% extends "base.html" %}
+
+{% block title %}Captions - AutoRepost Pipeline{% endblock %}
+{% block page_title %}Captions{% endblock %}
+
+{% block content %}
+<!-- Caption Count Badge & Info -->
+<div class="mb-6 flex flex-col md:flex-row gap-4 items-start md:items-center justify-between">
+    <div>
+        <div class="flex items-center gap-3">
+            <h3 class="text-lg font-semibold">Caption Pool</h3>
+            <span class="inline-flex items-center px-3 py-1 rounded-full text-sm bg-blue-900/50 text-blue-300 border border-blue-700 font-medium">
+                {{ captions_count }} captions in pool
+            </span>
+        </div>
+        <p class="text-sm text-slate-400 mt-1">When a video has no caption, one of these is chosen randomly</p>
+    </div>
+</div>
+
+<!-- Captions List -->
+<div class="bg-[#1e293b] rounded-xl border border-[#334155] overflow-hidden mb-8">
+    <div class="px-6 py-4 border-b border-[#334155] bg-[#0f172a]/50">
+        <h4 class="font-medium">All Captions</h4>
+    </div>
+
+    {% if captions %}
+        <div class="divide-y divide-[#334155]">
+            {% for idx, caption in captions %}
+            <div class="p-4 flex gap-4 items-start hover:bg-[#334155]/30 transition-colors group">
+                <!-- Index -->
+                <div class="flex-shrink-0 w-8 h-8 bg-[#0f172a] border border-[#334155] rounded-full flex items-center justify-center text-sm font-mono text-slate-400">
+                    {{ idx + 1 }}
+                </div>
+
+                <!-- Caption Text -->
+                <div class="flex-1 min-w-0">
+                    <p class="text-slate-200 break-words">{{ caption }}</p>
+                    <p class="text-xs text-slate-500 mt-1 font-mono">{{ caption|length }} chars</p>
+                </div>
+
+                <!-- Delete Button -->
+                <form action="/captions/delete" method="POST" class="flex-shrink-0" onsubmit="return confirm('Delete this caption?')">
+                    <input type="hidden" name="index" value="{{ idx }}">
+                    <button 
+                        type="submit"
+                        class="px-3 py-1.5 bg-red-900/50 hover:bg-red-800 text-red-300 hover:text-red-200 border border-red-800 rounded-lg text-sm transition-colors flex items-center gap-1 opacity-60 group-hover:opacity-100"
+                        title="Delete caption"
+                    >
+                        <span>🗑️</span> Delete
+                    </button>
+                </form>
+            </div>
+            {% endfor %}
+        </div>
+    {% else %}
+        <div class="p-12 text-center">
+            <div class="flex flex-col items-center gap-3 text-slate-500">
+                <span class="text-4xl">📝</span>
+                <h4 class="font-medium text-slate-300">No captions in pool</h4>
+                <p class="text-sm max-w-md">Add some fallback captions below. They'll be used when a video has no original caption.</p>
+            </div>
+        </div>
+    {% endif %}
+</div>
+
+<!-- Add New Caption Form -->
+<div class="bg-[#1e293b] rounded-xl border border-[#334155] overflow-hidden">
+    <div class="px-6 py-4 border-b border-[#334155]">
+        <h4 class="font-medium flex items-center gap-2">
+            <span>➕</span> Add New Caption
+        </h4>
+        <p class="text-sm text-slate-400 mt-1">Create a new fallback caption for videos without original captions</p>
+    </div>
+
+    <form action="/captions/add" method="POST" class="p-6">
+        <div class="mb-4">
+            <label for="new_caption" class="block text-sm font-medium text-slate-300 mb-2">
+                Caption Text
+            </label>
+            <textarea 
+                id="new_caption"
+                name="new_caption" 
+                rows="3"
+                placeholder="Follow for more 🔥"
+                required
+                maxlength="2200"
+                class="w-full px-4 py-3 bg-[#0f172a] border border-[#334155] rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 resize-none"
+            ></textarea>
+            <div class="flex justify-between mt-2">
+                <p class="text-xs text-slate-500">Supports emojis, hashtags, mentions. Max 2200 characters (Instagram limit).</p>
+                <p class="text-xs text-slate-500"><span id="charCount">0</span>/2200</p>
+            </div>
+        </div>
+
+        <div class="flex items-center justify-between pt-2">
+            <p class="text-xs text-slate-500">💡 Tip: Use engaging CTAs like "Follow", "Comment", "Tag someone"</p>
+            <button 
+                type="submit"
+                class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+            >
+                <span>➕</span> Add Caption
+            </button>
+        </div>
+    </form>
+</div>
+
+<!-- Examples & Tips -->
+<div class="mt-8 grid grid-cols-1 md:grid-cols-2 gap-6">
+    <div class="bg-[#1e293b] rounded-xl border border-[#334155] p-6">
+        <h4 class="font-medium mb-3">✨ Example Captions</h4>
+        <ul class="space-y-2 text-sm">
+            <li class="bg-[#0f172a] px-3 py-2 rounded-lg border border-[#334155]/50 text-slate-300">Follow for more 🔥</li>
+            <li class="bg-[#0f172a] px-3 py-2 rounded-lg border border-[#334155]/50 text-slate-300">Drop a comment below 👇</li>
+            <li class="bg-[#0f172a] px-3 py-2 rounded-lg border border-[#334155]/50 text-slate-300">Tag someone who needs this!</li>
+            <li class="bg-[#0f172a] px-3 py-2 rounded-lg border border-[#334155]/50 text-slate-300">This is too good not to share 😍</li>
+            <li class="bg-[#0f172a] px-3 py-2 rounded-lg border border-[#334155]/50 text-slate-300">Save this for later 📌</li>
+        </ul>
+    </div>
+    <div class="bg-[#1e293b] rounded-xl border border-[#334155] p-6">
+        <h4 class="font-medium mb-3">📖 How Captions Work</h4>
+        <ul class="text-sm text-slate-400 space-y-2 list-disc list-inside">
+            <li>When you send a video link, bot tries to extract original caption/description</li>
+            <li>If original caption exists and not empty → uses it (truncated to 2200 chars if needed)</li>
+            <li>If no original caption → picks random one from this pool</li>
+            <li>If pool empty → uses fallback: <code class="bg-[#0f172a] px-1 py-0.5 rounded">Check this out! 🔥</code></li>
+            <li>Manage captions here or via Telegram: <code class="bg-[#0f172a] px-1 py-0.5 rounded">/addcaption</code></li>
+        </ul>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const textarea = document.getElementById('new_caption');
+const charCount = document.getElementById('charCount');
+
+function updateCount() {
+    charCount.textContent = textarea.value.length;
+    if (textarea.value.length > 2000) {
+        charCount.classList.add('text-yellow-400');
+    } else {
+        charCount.classList.remove('text-yellow-400');
+    }
+    if (textarea.value.length >= 2200) {
+        charCount.classList.add('text-red-400');
+        charCount.classList.remove('text-yellow-400');
+    } else {
+        charCount.classList.remove('text-red-400');
+    }
+}
+
+textarea.addEventListener('input', updateCount);
+updateCount();
+</script>
+{% endblock %}

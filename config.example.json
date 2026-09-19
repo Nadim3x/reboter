@@ -1,0 +1,16 @@
+{
+  "telegram_token": "YOUR_TELEGRAM_BOT_TOKEN",
+  "zernio_api_key": "YOUR_ZERNIO_API_KEY",
+  "default_thumbnail": "thumbnails/default.jpg",
+  "post_to": ["instagram", "tiktok"],
+  "captions": [
+    "Follow for more 🔥",
+    "Drop a comment below 👇",
+    "Tag someone who needs this!",
+    "This is too good not to share 😍",
+    "Save this for later 📌",
+    "You need to see this 👀",
+    "Who else can relate? 💯",
+    "Share with your friends! 🚀"
+  ]
+}
