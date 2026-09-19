@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+
+{% block title %}Settings - AutoRepost Pipeline{% endblock %}
+{% block page_title %}Settings{% endblock %}
+
+{% block content %}
+<div class="max-w-3xl">
+    <!-- Warning Note -->
+    <div class="mb-6 p-4 rounded-lg bg-yellow-900/30 border border-yellow-700/50 text-yellow-200 text-sm flex gap-3">
+        <span class="text-lg">⚠️</span>
+        <div>
+            <p class="font-medium">Security Notice</p>
+            <p class="mt-1 text-yellow-200/80">config.json is gitignored — your tokens are never pushed to GitHub. Keep your API keys secure and don't share them.</p>
+        </div>
+    </div>
+
+    <!-- Settings Form -->
+    <div class="bg-[#1e293b] rounded-xl border border-[#334155] overflow-hidden">
+        <div class="px-6 py-4 border-b border-[#334155]">
+            <h3 class="font-semibold">API Configuration</h3>
+            <p class="text-sm text-slate-400 mt-1">Manage your Telegram bot token and Zernio API key</p>
+        </div>
+
+        <form method="POST" action="/settings" class="p-6 space-y-6">
+            <!-- Telegram Bot Token -->
+            <div>
+                <label for="telegram_token" class="block text-sm font-medium text-slate-300 mb-2">
+                    Telegram Bot Token
+                </label>
+                <div class="relative">
+                    <input 
+                        type="password" 
+                        id="telegram_token" 
+                        name="telegram_token" 
+                        placeholder="123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ"
+                        value="{{ telegram_token }}"
+                        class="w-full px-4 py-3 pr-20 bg-[#0f172a] border border-[#334155] rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                    >
+                    <button 
+                        type="button" 
+                        onclick="toggleVisibility('telegram_token', this)"
+                        class="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 text-xs bg-[#334155] hover:bg-[#475569] rounded-md text-slate-300 transition-colors"
+                    >
+                        Show
+                    </button>
+                </div>
+                <p class="text-xs text-slate-500 mt-2">
+                    Get from <a href="https://t.me/BotFather" target="_blank" class="text-blue-400 hover:text-blue-300">@BotFather</a> on Telegram → /newbot. 
+                    Currently masked as: <span class="font-mono text-slate-400">{{ masked_telegram }}</span>
+                </p>
+            </div>
+
+            <!-- Zernio API Key -->
+            <div>
+                <label for="zernio_api_key" class="block text-sm font-medium text-slate-300 mb-2">
+                    Zernio API Key
+                </label>
+                <div class="relative">
+                    <input 
+                        type="password" 
+                        id="zernio_api_key" 
+                        name="zernio_api_key" 
+                        placeholder="your_zernio_api_key_here"
+                        value="{{ zernio_api_key }}"
+                        class="w-full px-4 py-3 pr-20 bg-[#0f172a] border border-[#334155] rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 font-mono text-sm"
+                    >
+                    <button 
+                        type="button" 
+                        onclick="toggleVisibility('zernio_api_key', this)"
+                        class="absolute right-2 top-1/2 -translate-y-1/2 px-3 py-1.5 text-xs bg-[#334155] hover:bg-[#475569] rounded-md text-slate-300 transition-colors"
+                    >
+                        Show
+                    </button>
+                </div>
+                <p class="text-xs text-slate-500 mt-2">
+                    Get from your <a href="https://zernio.com" target="_blank" class="text-blue-400 hover:text-blue-300">Zernio dashboard</a>. 
+                    Currently masked as: <span class="font-mono text-slate-400">{{ masked_zernio }}</span>
+                </p>
+            </div>
+
+            <!-- Save Button -->
+            <div class="pt-4 border-t border-[#334155] flex items-center justify-between">
+                <p class="text-xs text-slate-500">Leave blank to keep existing value. Masked values won't overwrite if unchanged.</p>
+                <button 
+                    type="submit" 
+                    class="px-6 py-3 bg-blue-600 hover:bg-blue-700 text-white font-medium rounded-lg transition-colors flex items-center gap-2"
+                >
+                    <span>💾</span> Save Settings
+                </button>
+            </div>
+        </form>
+    </div>
+
+    <!-- Additional Info Cards -->
+    <div class="mt-6 grid grid-cols-1 md:grid-cols-2 gap-6">
+        <div class="bg-[#1e293b] rounded-xl p-6 border border-[#334155]">
+            <h4 class="font-medium mb-2 flex items-center gap-2">
+                <span>🤖</span> Telegram Setup
+            </h4>
+            <ol class="text-sm text-slate-400 space-y-1 list-decimal list-inside">
+                <li>Message <span class="text-blue-400">@BotFather</span> on Telegram</li>
+                <li>Send <code class="bg-[#0f172a] px-1.5 py-0.5 rounded text-slate-300">/newbot</code> and follow prompts</li>
+                <li>Copy the token and paste above</li>
+                <li>Start your bot and send it a video link!</li>
+            </ol>
+        </div>
+        <div class="bg-[#1e293b] rounded-xl p-6 border border-[#334155]">
+            <h4 class="font-medium mb-2 flex items-center gap-2">
+                <span>🚀</span> Zernio Setup
+            </h4>
+            <ol class="text-sm text-slate-400 space-y-1 list-decimal list-inside">
+                <li>Create account at <span class="text-blue-400">zernio.com</span></li>
+                <li>Connect Instagram & TikTok accounts</li>
+                <li>Go to API settings and copy your API key</li>
+                <li>Paste key above and save</li>
+            </ol>
+            <p class="text-xs text-yellow-400/80 mt-3">⚠️ Update endpoint in uploader.py with real Zernio API URL</p>
+        </div>
+    </div>
+
+    <!-- Current Config Preview -->
+    <div class="mt-6 bg-[#1e293b] rounded-xl border border-[#334155] overflow-hidden">
+        <div class="px-6 py-4 border-b border-[#334155]">
+            <h4 class="font-medium">Configuration File</h4>
+            <p class="text-xs text-slate-500 mt-1">Location: config.json (gitignored)</p>
+        </div>
+        <div class="p-6">
+            <div class="bg-[#0f172a] rounded-lg p-4 font-mono text-xs text-slate-400 overflow-x-auto">
+                <div>telegram_token: {{ masked_telegram or 'Not set' }}</div>
+                <div>zernio_api_key: {{ masked_zernio or 'Not set' }}</div>
+                <div class="mt-2 text-slate-500">Edit via this form or directly in config.json</div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+function toggleVisibility(inputId, button) {
+    const input = document.getElementById(inputId);
+    if (input.type === 'password') {
+        input.type = 'text';
+        button.textContent = 'Hide';
+    } else {
+        input.type = 'password';
+        button.textContent = 'Show';
+    }
+}
+</script>
+{% endblock %}

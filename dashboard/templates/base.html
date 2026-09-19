@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}AutoRepost Pipeline{% endblock %}</title>
+    <!-- Tailwind CSS via CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+        tailwind.config = {
+            darkMode: 'class',
+            theme: {
+                extend: {
+                    colors: {
+                        dark: {
+                            900: '#0f172a',
+                            800: '#1e293b',
+                            700: '#334155',
+                            600: '#475569',
+                        }
+                    }
+                }
+            }
+        }
+    </script>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: white;
+        }
+        /* Custom scrollbar for dark theme */
+        ::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        ::-webkit-scrollbar-track {
+            background: #1e293b;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: #475569;
+            border-radius: 4px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: #64748b;
+        }
+    </style>
+    {% block extra_head %}{% endblock %}
+</head>
+<body class="bg-[#0f172a] text-white min-h-screen flex">
+
+    <!-- Fixed Left Sidebar -->
+    <aside class="fixed left-0 top-0 h-screen w-64 bg-[#1e293b] border-r border-[#334155] flex flex-col z-10">
+        <!-- Logo / Title -->
+        <div class="p-6 border-b border-[#334155]">
+            <h1 class="text-2xl font-bold flex items-center gap-2">
+                <span>🎬</span> AutoRepost
+            </h1>
+            <p class="text-sm text-slate-400 mt-1">Video Repost Pipeline</p>
+        </div>
+
+        <!-- Navigation Links -->
+        <nav class="flex-1 p-4 space-y-1">
+            <a href="/" 
+               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path == '/' %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
+                <span>📊</span> Dashboard
+            </a>
+            <a href="/settings" 
+               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/settings') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
+                <span>⚙️</span> Settings
+            </a>
+            <a href="/thumbnails" 
+               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/thumbnails') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
+                <span>🖼️</span> Thumbnails
+            </a>
+            <a href="/captions" 
+               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/captions') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
+                <span>📝</span> Captions
+            </a>
+            <a href="/logs" 
+               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/logs') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
+                <span>📜</span> Logs
+            </a>
+        </nav>
+
+        <!-- Footer in Sidebar -->
+        <div class="p-4 border-t border-[#334155]">
+            <div class="text-xs text-slate-500">
+                <p>AutoRepost Pipeline</p>
+                <p class="mt-1">v1.0.0</p>
+            </div>
+        </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="ml-64 flex-1 min-h-screen">
+        <!-- Top Bar -->
+        <header class="bg-[#1e293b] border-b border-[#334155] px-8 py-4 sticky top-0 z-10">
+            <div class="flex items-center justify-between">
+                <h2 class="text-xl font-semibold">
+                    {% block page_title %}Dashboard{% endblock %}
+                </h2>
+                <div class="flex items-center gap-4">
+                    <span class="text-sm text-slate-400">🌐 http://localhost:5000</span>
+                    <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Flash Messages -->
+        <div class="px-8 pt-6">
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% if messages %}
+                    {% for category, message in messages %}
+                        {% if category == 'success' %}
+                            <div class="mb-4 p-4 rounded-lg bg-green-900/50 border border-green-700 text-green-200 flex items-center gap-2">
+                                <span>✅</span> {{ message }}
+                            </div>
+                        {% elif category == 'error' %}
+                            <div class="mb-4 p-4 rounded-lg bg-red-900/50 border border-red-700 text-red-200 flex items-center gap-2">
+                                <span>❌</span> {{ message }}
+                            </div>
+                        {% else %}
+                            <div class="mb-4 p-4 rounded-lg bg-blue-900/50 border border-blue-700 text-blue-200 flex items-center gap-2">
+                                <span>ℹ️</span> {{ message }}
+                            </div>
+                        {% endif %}
+                    {% endfor %}
+                {% endif %}
+            {% endwith %}
+        </div>
+
+        <!-- Page Content -->
+        <div class="px-8 py-6">
+            {% block content %}{% endblock %}
+        </div>
+    </main>
+
+    {% block scripts %}{% endblock %}
+</body>
+</html>
