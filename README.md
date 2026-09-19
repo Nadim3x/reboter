@@ -106,6 +106,7 @@ cp config.example.json config.json
 {
   "telegram_token": "123456:ABC-your-telegram-bot-token",
   "zernio_api_key": "your_zernio_api_key_here",
+  "zernio_api_base_url": "https://api.zernio.com",
   "default_thumbnail": "thumbnails/default.jpg",
   "post_to": ["instagram", "tiktok"],
   "captions": ["Your captions..."]
@@ -114,6 +115,7 @@ cp config.example.json config.json
 
 - Get **Telegram Bot Token** from [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`)
 - Get **Zernio API Key** from your Zernio dashboard
+- Set the **Zernio API Base URL** in the dashboard Settings page if your account uses a different API host. The uploader uses `/v1/upload` by default.
 
 > ⚠️ `config.json` is gitignored — your tokens will never be pushed to GitHub.
 
@@ -290,7 +292,7 @@ All routes require a login (session cookie or HTTP Basic auth) except `/healthz`
 | `/login` | GET/POST | Login page (sets the session cookie) |
 | `/logout` | POST | Clear the session cookie |
 | `/healthz` | GET | Public liveness check: always returns only `{"status":"ok","auth_required":true}` |
-| `/settings` | GET/POST | Manage Telegram token & Zernio API key |
+| `/settings` | GET/POST | Manage Telegram token, Zernio API key & API base URL |
 | `/thumbnails` | GET | List thumbnails & current default |
 | `/thumbnails/upload` | POST | Upload new thumbnail |
 | `/thumbnails/set` | POST | Set default thumbnail |
@@ -315,8 +317,7 @@ tail -f logs/pipeline.log
 
 ## TODOs
 
-- [ ] Replace Zernio API endpoint in `uploader.py` with real endpoint from Zernio dashboard
-- [ ] Verify multipart field names match Zernio API spec (currently `video`, `thumbnail`, `caption`, `platform`)
+- [ ] Verify the upload path, headers, and multipart field names match the Zernio API spec (currently `video`, `thumbnail`, `caption`, `platform`)
 - [ ] Add rate limiting for Telegram bot if needed
 - [ ] Add support for scheduling posts via Zernio if API supports it
 
@@ -335,6 +336,8 @@ MIT License - feel free to use and modify.
 **Dashboard not loading images** — Ensure thumbnails folder exists and Flask has read permission.
 
 **Bot not responding** — Check `logs/pipeline.log` and verify the Telegram token is correct. The public `/healthz` endpoint only confirms that the dashboard is alive; inspect the dashboard overview or logs for pipeline state.
+
+**API upload errors** — Open Settings in the dashboard and verify the Zernio API key and base URL. A host-only base URL receives `/v1/upload` automatically; a complete URL ending in `/upload` is used as entered.
 
 **Dashboard says "login is not configured" / can't log in** — `DASHBOARD_PASSWORD` is missing from `.env`. Run `./install.sh` again (it prompts, or generates one) or add `DASHBOARD_USER=…` / `DASHBOARD_PASSWORD='…'` yourself, then restart. Failed attempts are listed in `logs/pipeline.log`.
 

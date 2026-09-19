@@ -27,6 +27,7 @@ import hashlib
 import logging
 import secrets
 from datetime import datetime
+from urllib.parse import urlsplit
 
 # Allow importing from parent directory (for caption.py helpers)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -132,6 +133,10 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOGS_PATH = os.path.join(BASE_DIR, "logs", "pipeline.log")
 THUMBNAILS_DIR = os.path.join(BASE_DIR, "thumbnails")
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
+
+# The uploader appends the upload route to this value. It is configurable from
+# the Settings page so deployments do not need to edit Python source code.
+DEFAULT_ZERNIO_API_BASE_URL = "https://api.zernio.com"
 
 # Ensure required directories exist
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
@@ -434,6 +439,32 @@ def mask_token(token: str) -> str:
     return token[:4] + "•" * (len(token) - 8) + token[-4:]
 
 
+def normalize_api_base_url(value: str) -> str:
+    """Validate and normalize the user-configured Zernio API base URL."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("a URL is required")
+
+    url = value.strip()
+    if any(character.isspace() for character in url):
+        raise ValueError("the URL must not contain spaces")
+
+    try:
+        parsed = urlsplit(url)
+        # Accessing .port catches malformed ports such as ``:not-a-port``.
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"invalid URL ({exc})") from exc
+
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("use a complete http:// or https:// URL")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("URLs must not contain embedded credentials")
+    if parsed.query or parsed.fragment:
+        raise ValueError("do not include a query string or fragment")
+
+    return url.rstrip("/")
+
+
 def get_recent_logs(num_lines: int = 20) -> list:
     """Read last N lines from log file."""
     try:
@@ -609,7 +640,7 @@ def logout():
 
 @app.route("/settings", methods=["GET", "POST"])
 def settings():
-    """Manage Telegram token and Zernio API key."""
+    """Manage Telegram token, Zernio API key, and API base URL."""
     try:
         config = load_config()
     except FileNotFoundError:
@@ -617,6 +648,7 @@ def settings():
         config = {
             "telegram_token": "",
             "zernio_api_key": "",
+            "zernio_api_base_url": DEFAULT_ZERNIO_API_BASE_URL,
             "default_thumbnail": "thumbnails/default.jpg",
             "post_to": ["instagram", "tiktok"],
             "captions": [],
@@ -626,22 +658,34 @@ def settings():
         config = {
             "telegram_token": "",
             "zernio_api_key": "",
+            "zernio_api_base_url": DEFAULT_ZERNIO_API_BASE_URL,
             "default_thumbnail": "thumbnails/default.jpg",
             "post_to": ["instagram", "tiktok"],
             "captions": [],
         }
 
     if request.method == "POST":
-        # Update tokens from form
+        # Update tokens and the API base URL from the form.
         telegram_token = request.form.get("telegram_token", "").strip()
         zernio_api_key = request.form.get("zernio_api_key", "").strip()
+        zernio_api_base_url = request.form.get("zernio_api_base_url", "").strip()
 
-        # Only update if provided (not empty)
-        # If masked value submitted, don't overwrite
+        # Only update tokens if provided (not empty). If a masked value is
+        # submitted, leave the existing secret untouched.
         if telegram_token and "•" not in telegram_token:
             config["telegram_token"] = telegram_token
         if zernio_api_key and "•" not in zernio_api_key:
             config["zernio_api_key"] = zernio_api_key
+
+        # The URL is not a secret, so it is shown as-is and normalized before
+        # saving. An empty field keeps the existing value for consistency with
+        # the token fields above.
+        if zernio_api_base_url:
+            try:
+                config["zernio_api_base_url"] = normalize_api_base_url(zernio_api_base_url)
+            except ValueError as e:
+                flash(f"❌ Invalid Zernio API base URL: {e}", "error")
+                return redirect(url_for("settings"))
 
         try:
             save_config(config)
@@ -654,6 +698,11 @@ def settings():
     # GET — mask tokens for display
     telegram_token = config.get("telegram_token", "")
     zernio_api_key = config.get("zernio_api_key", "")
+    zernio_api_base_url = config.get("zernio_api_base_url", DEFAULT_ZERNIO_API_BASE_URL)
+    if not isinstance(zernio_api_base_url, str) or not zernio_api_base_url.strip():
+        zernio_api_base_url = DEFAULT_ZERNIO_API_BASE_URL
+    else:
+        zernio_api_base_url = zernio_api_base_url.strip()
 
     masked_telegram = mask_token(telegram_token) if telegram_token else ""
     masked_zernio = mask_token(zernio_api_key) if zernio_api_key else ""
@@ -662,6 +711,7 @@ def settings():
         "settings.html",
         telegram_token=telegram_token,
         zernio_api_key=zernio_api_key,
+        zernio_api_base_url=zernio_api_base_url,
         masked_telegram=masked_telegram,
         masked_zernio=masked_zernio,
     )
