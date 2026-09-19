@@ -3,8 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#08111f">
+    <meta name="robots" content="noindex, nofollow">
     <title>{% block title %}AutoRepost Pipeline{% endblock %}</title>
-    <!-- Tailwind CSS via CDN -->
     <script src="https://cdn.tailwindcss.com"></script>
     <script>
         tailwind.config = {
@@ -12,138 +13,152 @@
             theme: {
                 extend: {
                     colors: {
-                        dark: {
-                            900: '#0f172a',
-                            800: '#1e293b',
-                            700: '#334155',
-                            600: '#475569',
-                        }
+                        ink: { 950: '#08111f', 900: '#0d1828', 800: '#132238', 700: '#1b2d46' },
+                        accent: { 400: '#67e8f9', 500: '#22d3ee', 600: '#0891b2' }
+                    },
+                    boxShadow: {
+                        glow: '0 0 0 1px rgba(34, 211, 238, .12), 0 18px 50px rgba(2, 8, 23, .28)'
                     }
                 }
             }
         }
     </script>
     <style>
+        :root { color-scheme: dark; }
         body {
-            background-color: #0f172a;
-            color: white;
+            background:
+                radial-gradient(circle at 80% -10%, rgba(8, 145, 178, .13), transparent 32rem),
+                #08111f;
+            color: #f8fafc;
         }
-        /* Custom scrollbar for dark theme */
-        ::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
+        .glass { background: rgba(19, 34, 56, .78); backdrop-filter: blur(16px); }
+        .sidebar-link { position: relative; }
+        .sidebar-link.active::before {
+            content: ""; position: absolute; left: -1rem; top: .55rem; bottom: .55rem;
+            width: 3px; border-radius: 999px; background: #22d3ee;
+            box-shadow: 0 0 16px rgba(34, 211, 238, .75);
         }
-        ::-webkit-scrollbar-track {
-            background: #1e293b;
-        }
-        ::-webkit-scrollbar-thumb {
-            background: #475569;
-            border-radius: 4px;
-        }
-        ::-webkit-scrollbar-thumb:hover {
-            background: #64748b;
-        }
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: #0d1828; }
+        ::-webkit-scrollbar-thumb { background: #2a405d; border-radius: 999px; }
+        ::-webkit-scrollbar-thumb:hover { background: #3b5879; }
     </style>
     {% block extra_head %}{% endblock %}
 </head>
-<body class="bg-[#0f172a] text-white min-h-screen flex">
+<body class="min-h-screen overflow-x-hidden">
+    <div id="mobileBackdrop" class="fixed inset-0 z-20 hidden bg-slate-950/70 backdrop-blur-sm lg:hidden" aria-hidden="true"></div>
 
-    <!-- Fixed Left Sidebar -->
-    <aside class="fixed left-0 top-0 h-screen w-64 bg-[#1e293b] border-r border-[#334155] flex flex-col z-10">
-        <!-- Logo / Title -->
-        <div class="p-6 border-b border-[#334155]">
-            <h1 class="text-2xl font-bold flex items-center gap-2">
-                <span>🎬</span> AutoRepost
-            </h1>
-            <p class="text-sm text-slate-400 mt-1">Video Repost Pipeline</p>
+    <aside id="sidebar" class="fixed inset-y-0 left-0 z-30 flex w-72 -translate-x-full flex-col border-r border-white/10 bg-ink-900/95 px-4 py-5 shadow-2xl transition-transform duration-200 lg:translate-x-0">
+        <div class="flex items-center justify-between px-3 pb-6">
+            <a href="{{ url_for('index') }}" class="flex items-center gap-3" aria-label="AutoRepost home">
+                <span class="flex h-11 w-11 items-center justify-center rounded-2xl bg-gradient-to-br from-cyan-300 via-cyan-500 to-blue-600 text-xl shadow-lg shadow-cyan-500/20">✦</span>
+                <span>
+                    <span class="block text-base font-bold tracking-tight text-white">AutoRepost</span>
+                    <span class="block text-xs text-slate-400">Pipeline console</span>
+                </span>
+            </a>
+            <button id="closeSidebar" class="rounded-lg p-2 text-slate-400 hover:bg-white/10 hover:text-white lg:hidden" aria-label="Close navigation">✕</button>
         </div>
 
-        <!-- Navigation Links -->
-        <nav class="flex-1 p-4 space-y-1">
-            <a href="/" 
-               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path == '/' %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
-                <span>📊</span> Dashboard
+        <div class="mb-5 rounded-2xl border border-cyan-400/15 bg-cyan-400/5 px-4 py-3">
+            <div class="flex items-center gap-2 text-xs font-semibold uppercase tracking-widest text-cyan-300">
+                <span class="h-2 w-2 animate-pulse rounded-full bg-emerald-400"></span> Control center
+            </div>
+            <p class="mt-2 text-xs leading-5 text-slate-400">Manage your reposting workflow from one secure workspace.</p>
+        </div>
+
+        <p class="px-3 pb-2 text-[10px] font-semibold uppercase tracking-[.2em] text-slate-500">Workspace</p>
+        <nav class="flex-1 space-y-1" aria-label="Main navigation">
+            <a href="{{ url_for('index') }}" class="sidebar-link {% if request.path == '/' %}active bg-cyan-400/10 text-cyan-200{% else %}text-slate-400 hover:bg-white/5 hover:text-white{% endif %} flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition">
+                <span class="text-base">◈</span> Overview
             </a>
-            <a href="/settings" 
-               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/settings') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
-                <span>⚙️</span> Settings
+            <a href="{{ url_for('settings') }}" class="sidebar-link {% if request.path.startswith('/settings') %}active bg-cyan-400/10 text-cyan-200{% else %}text-slate-400 hover:bg-white/5 hover:text-white{% endif %} flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition">
+                <span class="text-base">⚙</span> Settings
             </a>
-            <a href="/thumbnails" 
-               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/thumbnails') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
-                <span>🖼️</span> Thumbnails
+            <a href="{{ url_for('thumbnails') }}" class="sidebar-link {% if request.path.startswith('/thumbnails') %}active bg-cyan-400/10 text-cyan-200{% else %}text-slate-400 hover:bg-white/5 hover:text-white{% endif %} flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition">
+                <span class="text-base">▧</span> Thumbnails
             </a>
-            <a href="/captions" 
-               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/captions') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
-                <span>📝</span> Captions
+            <a href="{{ url_for('captions') }}" class="sidebar-link {% if request.path.startswith('/captions') %}active bg-cyan-400/10 text-cyan-200{% else %}text-slate-400 hover:bg-white/5 hover:text-white{% endif %} flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition">
+                <span class="text-base">✎</span> Captions
             </a>
-            <a href="/logs" 
-               class="flex items-center gap-3 px-4 py-3 rounded-lg transition-colors {% if request.path.startswith('/logs') %}bg-blue-600 text-white{% else %}text-slate-300 hover:bg-[#334155] hover:text-white{% endif %}">
-                <span>📜</span> Logs
+            <a href="{{ url_for('logs') }}" class="sidebar-link {% if request.path.startswith('/logs') %}active bg-cyan-400/10 text-cyan-200{% else %}text-slate-400 hover:bg-white/5 hover:text-white{% endif %} flex items-center gap-3 rounded-xl px-4 py-3 text-sm font-medium transition">
+                <span class="text-base">≡</span> Activity logs
             </a>
         </nav>
 
-        <!-- Footer in Sidebar -->
-        <div class="p-4 border-t border-[#334155]">
-            <div class="text-xs text-slate-500">
-                <p>AutoRepost Pipeline</p>
-                <p class="mt-1">v1.0.0</p>
+        <div class="border-t border-white/10 px-3 pt-5">
+            <div class="flex items-center gap-3 rounded-xl bg-white/[.03] px-3 py-3">
+                <span class="flex h-9 w-9 items-center justify-center rounded-full bg-slate-700 text-sm font-semibold text-cyan-200">{{ auth_user[:1]|upper }}</span>
+                <div class="min-w-0">
+                    <p class="truncate text-sm font-medium text-slate-200">{{ auth_user }}</p>
+                    <p class="text-xs text-slate-500">Administrator</p>
+                </div>
             </div>
+            <p class="mt-4 px-1 text-[11px] text-slate-600">AutoRepost Pipeline · v1.0.0</p>
         </div>
     </aside>
 
-    <!-- Main Content Area -->
-    <main class="ml-64 flex-1 min-h-screen">
-        <!-- Top Bar -->
-        <header class="bg-[#1e293b] border-b border-[#334155] px-8 py-4 sticky top-0 z-10">
-            <div class="flex items-center justify-between">
-                <h2 class="text-xl font-semibold">
-                    {% block page_title %}Dashboard{% endblock %}
-                </h2>
-                <div class="flex items-center gap-4">
-                    <span class="text-sm text-slate-400">🌐 http://localhost:5000</span>
-                    <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
-                    <span class="text-sm text-slate-400 border-l border-[#334155] pl-4">👤 {{ auth_user }}</span>
+    <main class="min-h-screen lg:ml-72">
+        <header class="sticky top-0 z-10 border-b border-white/10 bg-ink-950/80 px-4 py-4 backdrop-blur-xl sm:px-6 lg:px-10">
+            <div class="flex items-center justify-between gap-4">
+                <div class="flex items-center gap-3">
+                    <button id="openSidebar" class="rounded-xl border border-white/10 bg-white/5 p-2.5 text-slate-300 hover:bg-white/10 hover:text-white lg:hidden" aria-label="Open navigation" aria-controls="sidebar" aria-expanded="false">☰</button>
+                    <div>
+                        <p class="hidden text-[10px] font-semibold uppercase tracking-[.2em] text-cyan-400 sm:block">AutoRepost console</p>
+                        <h1 class="text-lg font-semibold tracking-tight text-white sm:text-xl">{% block page_title %}Overview{% endblock %}</h1>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2 sm:gap-4">
+                    <span class="hidden items-center gap-2 text-xs text-slate-500 xl:flex"><span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>{{ request.url_root.rstrip('/') }}</span>
+                    <span class="hidden h-5 w-px bg-white/10 sm:block"></span>
+                    <span class="hidden text-sm text-slate-400 sm:block"><span class="sr-only">👤 </span>{{ auth_user }}</span>
                     {% if auth_method == 'session' %}
                     <form method="post" action="{{ url_for('logout') }}">
-                        <button type="submit"
-                                class="text-sm px-3 py-1.5 rounded-lg bg-[#334155] hover:bg-[#475569] text-slate-200 transition-colors">
-                            Logout
-                        </button>
+                        <button type="submit" class="rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-xs font-medium text-slate-300 transition hover:border-cyan-400/30 hover:bg-cyan-400/10 hover:text-cyan-200">Logout</button>
                     </form>
                     {% endif %}
                 </div>
             </div>
         </header>
 
-        <!-- Flash Messages -->
-        <div class="px-8 pt-6">
+        <div class="mx-auto max-w-[1500px] px-4 pb-10 pt-5 sm:px-6 lg:px-10 lg:pt-8">
             {% with messages = get_flashed_messages(with_categories=true) %}
                 {% if messages %}
+                    <div class="mb-6 space-y-3">
                     {% for category, message in messages %}
                         {% if category == 'success' %}
-                            <div class="mb-4 p-4 rounded-lg bg-green-900/50 border border-green-700 text-green-200 flex items-center gap-2">
-                                <span>✅</span> {{ message }}
-                            </div>
+                            <div class="flex items-center gap-3 rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-200" role="status"><span>✓</span>{{ message }}</div>
                         {% elif category == 'error' %}
-                            <div class="mb-4 p-4 rounded-lg bg-red-900/50 border border-red-700 text-red-200 flex items-center gap-2">
-                                <span>❌</span> {{ message }}
-                            </div>
+                            <div class="flex items-center gap-3 rounded-2xl border border-rose-400/20 bg-rose-400/10 px-4 py-3 text-sm text-rose-200" role="alert"><span>!</span>{{ message }}</div>
                         {% else %}
-                            <div class="mb-4 p-4 rounded-lg bg-blue-900/50 border border-blue-700 text-blue-200 flex items-center gap-2">
-                                <span>ℹ️</span> {{ message }}
-                            </div>
+                            <div class="flex items-center gap-3 rounded-2xl border border-cyan-400/20 bg-cyan-400/10 px-4 py-3 text-sm text-cyan-200" role="status"><span>i</span>{{ message }}</div>
                         {% endif %}
                     {% endfor %}
+                    </div>
                 {% endif %}
             {% endwith %}
-        </div>
-
-        <!-- Page Content -->
-        <div class="px-8 py-6">
             {% block content %}{% endblock %}
         </div>
     </main>
 
+    <script>
+        (() => {
+            const sidebar = document.getElementById('sidebar');
+            const backdrop = document.getElementById('mobileBackdrop');
+            const open = document.getElementById('openSidebar');
+            const close = document.getElementById('closeSidebar');
+            const setMenu = (isOpen) => {
+                sidebar.classList.toggle('-translate-x-full', !isOpen);
+                sidebar.classList.toggle('translate-x-0', isOpen);
+                backdrop.classList.toggle('hidden', !isOpen);
+                open?.setAttribute('aria-expanded', String(isOpen));
+            };
+            open?.addEventListener('click', () => setMenu(true));
+            close?.addEventListener('click', () => setMenu(false));
+            backdrop?.addEventListener('click', () => setMenu(false));
+            document.addEventListener('keydown', (event) => { if (event.key === 'Escape') setMenu(false); });
+        })();
+    </script>
     {% block scripts %}{% endblock %}
 </body>
 </html>

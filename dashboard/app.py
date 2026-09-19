@@ -26,7 +26,6 @@ import base64
 import hashlib
 import logging
 import secrets
-import socket
 from datetime import datetime
 
 # Allow importing from parent directory (for caption.py helpers)
@@ -448,15 +447,6 @@ def get_recent_logs(num_lines: int = 20) -> list:
         return []
 
 
-def read_captions_safe() -> list:
-    """Return the caption pool without raising on a missing/broken config."""
-    try:
-        captions = load_config().get("captions", [])
-        return captions if isinstance(captions, list) else []
-    except Exception:
-        return []
-
-
 def bot_is_running() -> bool:
     """
     Best-effort check that the Telegram bot process is alive.
@@ -570,40 +560,10 @@ def index():
 
 @app.route("/healthz")
 def healthz():
-    """
-    Liveness endpoint for supervisors and uptime checks — always public.
-
-    Anonymous callers only learn that the dashboard is up and password
-    protected. The detailed report (bot alive, tokens configured, ...) is
-    included only when the request carries valid credentials, e.g.
-    ``curl -u admin:secret http://host:5000/healthz``.
-    """
-    payload = {"status": "ok", "auth_required": True}
-
-    if is_authenticated():
-        try:
-            config = load_config()
-            token_configured = bool(config.get("telegram_token")) and config.get(
-                "telegram_token"
-            ) != "YOUR_TELEGRAM_BOT_TOKEN"
-            key_configured = bool(config.get("zernio_api_key")) and config.get(
-                "zernio_api_key"
-            ) != "YOUR_ZERNIO_API_KEY"
-        except Exception:
-            token_configured = key_configured = False
-
-        payload.update(
-            {
-                "host": socket.gethostname(),
-                "bot_running": bot_is_running(),
-                "telegram_token_configured": token_configured,
-                "zernio_key_configured": key_configured,
-                "captions": len(read_captions_safe()),
-                "uptime_checked_at": datetime.now().isoformat(timespec="seconds"),
-            }
-        )
-
-    return json.dumps(payload), 200, {"Content-Type": "application/json"}
+    """Public liveness endpoint with a deliberately minimal response."""
+    # Keep this contract stable: health monitors should not receive hostnames,
+    # token state, log counts, or any other operational information.
+    return json.dumps({"status": "ok", "auth_required": True}), 200, {"Content-Type": "application/json"}
 
 
 @app.route("/login", methods=["GET", "POST"])

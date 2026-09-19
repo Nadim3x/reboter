@@ -675,11 +675,11 @@ verify_install() {
   step "Verifying installation"
   [ "$DRY_RUN" -eq 1 ] && { warn "Dry run — skipping verification"; return 0; }
 
-  if ! "$PYTHON_BIN" -c "import telegram, yt_dlp, flask, requests" 2>/dev/null; then
+  if ! "$PYTHON_BIN" -c "import telegram, yt_dlp, flask, gunicorn, requests" 2>/dev/null; then
     err "Some Python packages failed to import."
     die "Re-run: $PYTHON_BIN -m pip install -r $INSTALL_DIR/requirements.txt"
   fi
-  ok "Python imports OK (telegram, yt-dlp, flask, requests)"
+  ok "Python imports OK (telegram, yt-dlp, flask, gunicorn, requests)"
 
   local py_ok=1
   for f in bot.py downloader.py caption.py uploader.py dashboard/app.py; do

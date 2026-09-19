@@ -1,4 +1,5 @@
 python-telegram-bot[job-queue]>=20.0
 yt-dlp
 flask
+gunicorn>=21.2,<24
 requests
