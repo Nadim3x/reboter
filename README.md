@@ -7,8 +7,8 @@ An automated video reposting pipeline that receives video links via Telegram, do
 - 📱 **Telegram Bot** — Send any video link and it auto-reposts
 - ⬇️ **Universal Downloader** — Supports YouTube, Instagram, TikTok, Facebook Reels, and 1000+ sites via yt-dlp
 - 📝 **Smart Captions** — Extracts original caption or falls back to a random caption pool
-- 🖼️ **Thumbnail Management** — Default thumbnail applied to every post, managed via dashboard
-- 🚀 **Multi-Platform Upload** — Posts to Instagram & TikTok via Zernio API
+- 🖼️ **Thumbnail Management** — Default thumbnail managed via dashboard (used for Facebook/YouTube targets or as the TikTok cover; Instagram/TikTok take no custom thumbnail via API)
+- 🚀 **Multi-Platform Upload** — Publishes to Instagram & TikTok (optionally Facebook & YouTube) through the official [Zernio API](https://docs.zernio.com) flow: presign → upload → `POST /v1/posts`
 - 🌐 **Web Dashboard** — Manage tokens, thumbnails, captions, and view logs at `http://localhost:5000`
 - ☁️ **Optional Cloudflare Tunnel** — Publish the local dashboard through a temporary HTTPS URL with `./start.sh --tunnel`
 - 🔒 **Dashboard Login** — Password protected (login page + HTTP Basic auth) so it can be exposed remotely; failed logins are logged
@@ -105,19 +105,49 @@ cp config.example.json config.json
 ```json
 {
   "telegram_token": "123456:ABC-your-telegram-bot-token",
-  "zernio_api_key": "your_zernio_api_key_here",
-  "zernio_api_base_url": "https://api.zernio.com",
+  "zernio_api_key": "sk_your_zernio_api_key",
+  "zernio_api_base_url": "https://zernio.com/api/v1",
+  "zernio_account_ids": {},
   "default_thumbnail": "thumbnails/default.jpg",
   "post_to": ["instagram", "tiktok"],
+  "tiktok_settings": { "privacy_level": "PUBLIC_TO_EVERYONE", "allow_comment": true, "allow_duet": true, "allow_stitch": true },
+  "instagram_settings": { "shareToFeed": true },
+  "tiktok_cover_from_thumbnail": false,
   "captions": ["Your captions..."]
 }
 ```
 
 - Get **Telegram Bot Token** from [@BotFather](https://t.me/BotFather) on Telegram (`/newbot`)
-- Get **Zernio API Key** from your Zernio dashboard
-- Set the **Zernio API Base URL** in the dashboard Settings page if your account uses a different API host. The uploader uses `/v1/upload` by default.
+- Get **Zernio API Key** from [zernio.com → Dashboard → API keys](https://zernio.com/dashboard/api-keys) (it starts with `sk_`)
 
 > ⚠️ `config.json` is gitignored — your tokens will never be pushed to GitHub.
+
+### Zernio setup (required before the first post)
+
+The uploader follows the official [Zernio API](https://docs.zernio.com) flow — there is no single "upload" endpoint:
+
+1. `GET /v1/accounts` — find the **account id** of your connected Instagram / TikTok account
+2. `POST /v1/media/presign` → `PUT` the video to the returned storage URL
+3. `POST /v1/posts` with `publishNow: true` — publishes to every platform in `post_to` in one call
+
+For that to work you must **connect your social accounts to Zernio once**:
+
+1. Sign up at [zernio.com](https://zernio.com), create a profile
+2. In the Zernio dashboard connect **Instagram** (Business or Creator account required) and **TikTok** to that profile
+3. Create an API key and paste it into the dashboard **Settings** page (or `config.json`)
+4. Click **Check connection** on the Settings page (or send `/accounts` to the bot) — both platforms should show ✅
+
+| Key | Meaning |
+|-----|---------|
+| `zernio_api_base_url` | API root. Keep `https://zernio.com/api/v1` unless you proxy the API. Old values such as `https://api.zernio.com` are remapped automatically. |
+| `zernio_account_ids` | Optional `{ "instagram": "<24-char id>", "tiktok": "<id>" }`. When empty, the first *active* account of each platform is used. Pin ids if several accounts are connected. |
+| `post_to` | Any of `instagram`, `tiktok`, `facebook`, `youtube` (the account must be connected in Zernio). |
+| `tiktok_settings` | Merged into Zernio's `tiktokSettings`. TikTok requires `privacy_level` plus the consent flags `content_preview_confirmed` / `express_consent_given` on every post — the uploader sets both to `true`, meaning **you** confirm the content before sending it to the bot. Add e.g. `"is_aigc": true` for AI-generated content. |
+| `instagram_settings` | Instagram `platformSpecificData`, e.g. `{"shareToFeed": false}` to keep a Reel out of the main feed. |
+| `tiktok_cover_from_thumbnail` | `true` uploads the default thumbnail and uses it as the TikTok video cover (`video_cover_image_url`). |
+
+> ℹ️ Instagram Reels and TikTok take **no custom thumbnail** via the API; the default thumbnail is only attached for Facebook / YouTube targets (or as the TikTok cover when enabled above).
+> Zernio also rejects the *same video + caption* posted to the same account within 24 h (HTTP 409) — change the caption to repost.
 
 3. (Optional) Add a default thumbnail image to `thumbnails/default.jpg` or upload via dashboard later.
 
@@ -241,6 +271,7 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 |---------|-------------|
 | `/start` | Welcome message and usage instructions |
 | `/status` | Check if pipeline is running |
+| `/accounts` | Show the Instagram/TikTok accounts connected to Zernio and whether every `post_to` platform is ready |
 | `/captions` | List all captions in the pool |
 | `/addcaption [text]` | Add a new caption to the pool |
 | `/thumbnail` | Show current default thumbnail filename |
@@ -258,7 +289,9 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 ├── bot.py                 # Telegram bot (async)
 ├── downloader.py          # yt-dlp downloader
 ├── caption.py             # Caption selector & config helpers
-├── uploader.py            # Zernio API uploader
+├── uploader.py            # Zernio API uploader (accounts → presign → PUT → posts)
+├── tests/
+│   └── test_uploader.py   # Offline tests for the Zernio integration
 ├── config.json            # Your secrets (gitignored)
 ├── config.example.json    # Template config
 ├── requirements.txt
@@ -292,7 +325,7 @@ All routes require a login (session cookie or HTTP Basic auth) except `/healthz`
 | `/login` | GET/POST | Login page (sets the session cookie) |
 | `/logout` | POST | Clear the session cookie |
 | `/healthz` | GET | Public liveness check: always returns only `{"status":"ok","auth_required":true}` |
-| `/settings` | GET/POST | Manage Telegram token, Zernio API key & API base URL |
+| `/settings` | GET/POST | Manage Telegram token, Zernio API key & API base URL; `?check_zernio=1` lists the connected Zernio accounts |
 | `/thumbnails` | GET | List thumbnails & current default |
 | `/thumbnails/upload` | POST | Upload new thumbnail |
 | `/thumbnails/set` | POST | Set default thumbnail |
@@ -315,11 +348,19 @@ View logs via dashboard at `/logs` or:
 tail -f logs/pipeline.log
 ```
 
+## Tests
+
+Offline unit tests cover the Zernio integration (request shapes, error envelopes, legacy config values):
+
+```bash
+.venv/bin/python -m unittest discover -s tests -v
+```
+
 ## TODOs
 
-- [ ] Verify the upload path, headers, and multipart field names match the Zernio API spec (currently `video`, `thumbnail`, `caption`, `platform`)
 - [ ] Add rate limiting for Telegram bot if needed
-- [ ] Add support for scheduling posts via Zernio if API supports it
+- [ ] Optional scheduling (`scheduledFor` / queue) instead of `publishNow`
+- [ ] Poll `GET /v1/posts/{id}` for the TikTok URL, which appears a few minutes after publishing
 
 ## License
 
@@ -337,7 +378,13 @@ MIT License - feel free to use and modify.
 
 **Bot not responding** — Check `logs/pipeline.log` and verify the Telegram token is correct. The public `/healthz` endpoint only confirms that the dashboard is alive; inspect the dashboard overview or logs for pipeline state.
 
-**API upload errors** — Open Settings in the dashboard and verify the Zernio API key and base URL. A host-only base URL receives `/v1/upload` automatically; a complete URL ending in `/upload` is used as entered.
+**`API returned 404: No such API endpoint: POST /api/v1/upload`** — you are running an old version of `uploader.py` that posted to a non-existent endpoint. Update to this version; the uploader now uses `GET /v1/accounts` → `POST /v1/media/presign` → `PUT` → `POST /v1/posts`. A leftover `"zernio_api_base_url": "https://api.zernio.com"` in `config.json` is remapped automatically (Settings shows a hint; click *Save* to rewrite it).
+
+**`no instagram/tiktok account is connected to Zernio`** — connect the account to your Zernio profile at zernio.com, then check with **Settings → Check connection** or `/accounts`. If several accounts of one platform are connected, pin the right one in `zernio_account_ids`.
+
+**`HTTP 401 invalid_credentials`** — wrong or revoked Zernio API key (must start with `sk_`). **`HTTP 402`** — Zernio billing gate (free tier exceeded). **`HTTP 409 duplicate`** — same video + caption already posted to that account within 24 h; change the caption.
+
+**TikTok: `direct posting is at capacity` / privacy errors** — see the [Zernio TikTok page](https://docs.zernio.com/platforms/tiktok); reconnecting the TikTok account moves it to the Business-app lane. Business-app connections publish videos as public only, so keep `privacy_level` at `PUBLIC_TO_EVERYONE`.
 
 **Dashboard says "login is not configured" / can't log in** — `DASHBOARD_PASSWORD` is missing from `.env`. Run `./install.sh` again (it prompts, or generates one) or add `DASHBOARD_USER=…` / `DASHBOARD_PASSWORD='…'` yourself, then restart. Failed attempts are listed in `logs/pipeline.log`.
 

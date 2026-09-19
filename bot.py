@@ -27,7 +27,21 @@ from telegram.ext import (
 # Import our pipeline modules
 from downloader import download_video
 from caption import get_caption, load_config, save_config
-from uploader import upload_video
+from uploader import (
+    upload_video,
+    list_accounts,
+    normalize_api_base_url,
+    ZernioError,
+    PLACEHOLDER_API_KEYS,
+)
+
+# Display names for the per-platform status lines in Telegram replies
+PLATFORM_LABELS = {
+    "instagram": "Instagram",
+    "tiktok": "TikTok",
+    "facebook": "Facebook",
+    "youtube": "YouTube",
+}
 
 # ------------------------------------------------------------------------------
 # Setup Logging — both console and file
@@ -225,12 +239,66 @@ async def thumbnail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+def _describe_zernio_accounts() -> str:
+    """Blocking helper for /accounts: list connected Zernio accounts (runs in a thread)."""
+    config = load_config()
+    api_key = str(config.get("zernio_api_key") or "").strip()
+    if api_key in PLACEHOLDER_API_KEYS:
+        return "❌ Zernio API key is not configured. Set it in the dashboard → Settings."
+
+    base_url = normalize_api_base_url(config.get("zernio_api_base_url"))
+    accounts = list_accounts(api_key, base_url)
+
+    post_to = [str(p).lower().strip() for p in (config.get("post_to") or ["instagram", "tiktok"])]
+    overrides = config.get("zernio_account_ids") or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+
+    lines = ["🔗 Zernio accounts:"]
+    if not accounts:
+        lines.append("  (none connected — connect Instagram & TikTok at zernio.com)")
+    for account in accounts:
+        platform = str(account.get("platform") or "?").lower()
+        username = account.get("username") or "?"
+        state = "active" if account.get("isActive", True) else "INACTIVE — reconnect"
+        lines.append(f"  • {PLATFORM_LABELS.get(platform, platform.title())} @{username} — {state}\n    id: {account.get('_id', '?')}")
+
+    lines.append("")
+    lines.append("📤 post_to check:")
+    for platform in post_to:
+        override = str(overrides.get(platform) or "").strip()
+        active = [a for a in accounts if str(a.get("platform", "")).lower() == platform and a.get("isActive", True)]
+        if override:
+            lines.append(f"  {PLATFORM_LABELS.get(platform, platform.title())}: pinned to {override}")
+        elif active:
+            lines.append(f"  {PLATFORM_LABELS.get(platform, platform.title())}: ✅ @{active[0].get('username', '?')}")
+        else:
+            lines.append(f"  {PLATFORM_LABELS.get(platform, platform.title())}: ❌ not connected")
+    lines.append("")
+    lines.append(f"API: {base_url}")
+    return "\n".join(lines)
+
+
+async def accounts_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /accounts — show the social accounts connected to Zernio."""
+    try:
+        text = await asyncio.to_thread(_describe_zernio_accounts)
+    except ZernioError as e:
+        text = f"❌ Zernio error: {e}"
+    except Exception as e:
+        logger.error(f"Error in /accounts: {e}\n{traceback.format_exc()}")
+        text = f"❌ Error: {e}"
+    await update.message.reply_text(text[:4000], disable_web_page_preview=True)
+    logger.info(f"/accounts command from user {update.effective_user.id}")
+
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Handle /help — list all commands."""
     help_text = (
         "📖 *AutoRepost Pipeline — Commands:*\n\n"
         "/start — Welcome message\n"
         "/status — Check if pipeline is running\n"
+        "/accounts — Show Instagram/TikTok accounts connected to Zernio\n"
         "/captions — List all captions in pool\n"
         "/addcaption [text] — Add new caption to pool\n"
         "/thumbnail — Show current default thumbnail\n"
@@ -298,17 +366,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         final_caption = get_caption(original_caption)
         logger.info(f"Caption selected: {final_caption[:100]}...")
 
-        # Step 3: Get thumbnail path from config
+        # Step 3: Get thumbnail path + target platforms from config
+        target_names = "Instagram & TikTok"
         try:
             config = load_config()
             thumbnail_path = config.get("default_thumbnail", "thumbnails/default.jpg")
+            post_to = config.get("post_to") or []
+            if isinstance(post_to, list) and post_to:
+                target_names = " & ".join(PLATFORM_LABELS.get(str(p).lower(), str(p).title()) for p in post_to)
         except Exception as e:
             logger.warning(f"Could not load thumbnail from config: {e}, using default")
             thumbnail_path = "thumbnails/default.jpg"
 
-        # Step 4: Upload video
+        # Step 4: Upload video (presign -> PUT -> POST /v1/posts, see uploader.py)
         try:
-            await status_msg.edit_text("🚀 Uploading to Instagram & TikTok...")
+            await status_msg.edit_text(f"🚀 Publishing to {target_names} via Zernio...")
         except:
             pass
 
@@ -327,9 +399,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         success = upload_result.get("success", False)
         message_text_result = upload_result.get("message", "Unknown result")
 
-        # Build detailed status
-        instagram_status = upload_result.get("instagram", "unknown")
-        tiktok_status = upload_result.get("tiktok", "unknown")
+        # Per-platform lines (the uploader always includes instagram + tiktok,
+        # plus anything else listed in post_to).
+        platforms = upload_result.get("platforms") or ["instagram", "tiktok"]
+        platform_lines = "\n".join(
+            f"{PLATFORM_LABELS.get(p, p.title())}: {upload_result.get(p, 'unknown')}" for p in platforms
+        )
+        posted_to = [
+            PLATFORM_LABELS.get(p, p.title())
+            for p in platforms
+            if str(upload_result.get(p, "")).startswith("posted")
+        ]
 
         # Log entry: timestamp | url | caption_used | success/fail
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -339,29 +419,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.info(log_entry)
 
         if success:
+            headline = "✅ Posted to " + (" & ".join(posted_to) if posted_to else "Zernio") + "!"
+            if len(posted_to) < len(platforms):
+                headline = "⚠️ Partially posted (" + ", ".join(posted_to) + ")"
             reply_text = (
-                f"✅ Posted to Instagram & TikTok!\n"
+                f"{headline}\n"
                 f"📝 Caption: {final_caption}\n\n"
                 f"📊 {message_text_result}\n"
-                f"Instagram: {instagram_status}\n"
-                f"TikTok: {tiktok_status}"
+                f"{platform_lines}"
             )
-            try:
-                await status_msg.edit_text(reply_text)
-            except:
-                await update.message.reply_text(reply_text)
         else:
             reply_text = (
                 f"❌ Upload failed:\n"
                 f"{message_text_result}\n"
-                f"Instagram: {instagram_status}\n"
-                f"TikTok: {tiktok_status}\n\n"
+                f"{platform_lines}\n\n"
                 f"📝 Caption was: {final_caption}"
             )
-            try:
-                await status_msg.edit_text(reply_text)
-            except:
-                await update.message.reply_text(reply_text)
+        # Telegram caps messages at 4096 characters.
+        if len(reply_text) > 4000:
+            reply_text = reply_text[:3990] + "…"
+        try:
+            await status_msg.edit_text(reply_text, disable_web_page_preview=True)
+        except Exception:
+            await update.message.reply_text(reply_text, disable_web_page_preview=True)
 
     except ValueError as ve:
         # Known errors (invalid URL, too large, unavailable)
@@ -453,6 +533,7 @@ def main() -> None:
     # Register command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("accounts", accounts_command))
     application.add_handler(CommandHandler("captions", captions_command))
     application.add_handler(CommandHandler("addcaption", addcaption_command))
     application.add_handler(CommandHandler("thumbnail", thumbnail_command))
