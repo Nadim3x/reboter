@@ -2,12 +2,30 @@
 dashboard/app.py — Flask Web Dashboard
 
 Provides web UI to manage AutoRepost Pipeline settings, thumbnails, captions, logs.
+
+Access control
+--------------
+Every route except /healthz, /login and /logout requires authentication:
+
+* Browsers are redirected to the /login page; a successful login sets an
+  HMAC-signed, HttpOnly session cookie.
+* Scripts / uptime checkers can send HTTP Basic auth instead
+  (``curl -u user:pass http://host:5000/``).
+
+Credentials come from DASHBOARD_USER / DASHBOARD_PASSWORD (set in the
+gitignored .env, written by install.sh). If no password is configured the
+dashboard fails closed: nobody can log in until one is set.
 """
 
 import os
 import sys
 import json
-import socket
+import hmac
+import time
+import base64
+import hashlib
+import logging
+import secrets
 from datetime import datetime
 
 # Allow importing from parent directory (for caption.py helpers)
@@ -22,6 +40,26 @@ BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 
 
+def _parse_env_value(raw: str) -> str:
+    """
+    Turn the right-hand side of a KEY=VALUE line into its value.
+
+    start.sh sources .env with the shell, so install.sh writes anything that is
+    not shell-safe (e.g. passwords) single-quoted. Mirror the shell rules here:
+    'single quoted' is literal (with '\\'' for an embedded quote), "double
+    quoted" honours \\" \\\\ escapes, and bare values end at a " #" comment.
+    """
+    value = raw.strip()
+    if len(value) >= 2 and value[0] == "'" and value[-1] == "'":
+        return value[1:-1].replace("'\\''", "'")
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        return value[1:-1].replace('\\"', '"').replace("\\\\", "\\")
+    for marker in (" #", "\t#"):
+        if marker in value:
+            value = value.split(marker, 1)[0].rstrip()
+    return value
+
+
 def load_dotenv(path: str = ENV_PATH) -> None:
     """Load KEY=VALUE pairs from .env into os.environ (existing vars win)."""
     try:
@@ -32,9 +70,11 @@ def load_dotenv(path: str = ENV_PATH) -> None:
                 line = raw_line.strip()
                 if not line or line.startswith("#") or "=" not in line:
                     continue
+                if line.startswith("export "):
+                    line = line[len("export "):].lstrip()
                 key, _, value = line.partition("=")
                 key = key.strip()
-                value = value.strip().strip('"').strip("'")
+                value = _parse_env_value(value)
                 if key and key not in os.environ:
                     os.environ[key] = value
     except Exception:
@@ -44,7 +84,16 @@ def load_dotenv(path: str = ENV_PATH) -> None:
 
 load_dotenv()
 
-from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory
+from flask import (
+    Flask,
+    g,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    flash,
+    send_from_directory,
+)
 
 # Import config helpers
 try:
@@ -77,7 +126,6 @@ except ImportError:
 # ------------------------------------------------------------------------------
 
 app = Flask(__name__)
-app.secret_key = os.environ.get("FLASK_SECRET_KEY", "autorepost-secret-key-change-in-production")
 
 # Paths (BASE_DIR is the project root, resolved above)
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
@@ -92,6 +140,285 @@ os.makedirs(DOWNLOADS_DIR, exist_ok=True)
 
 # Allowed image extensions for thumbnails
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+# ------------------------------------------------------------------------------
+# Authentication — configuration
+# ------------------------------------------------------------------------------
+
+DASHBOARD_USER = os.environ.get("DASHBOARD_USER", "").strip() or "admin"
+DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
+
+AUTH_REALM = "AutoRepost Dashboard"
+SESSION_COOKIE_NAME = "autorepost_session"
+
+# Endpoints reachable without credentials. Everything else is protected.
+PUBLIC_ENDPOINTS = {"healthz", "login", "logout", "static"}
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _session_ttl_seconds() -> int:
+    """Login lifetime; DASHBOARD_SESSION_HOURS in .env, default 12h."""
+    try:
+        hours = float(os.environ.get("DASHBOARD_SESSION_HOURS", "12"))
+    except ValueError:
+        hours = 12.0
+    if hours <= 0:
+        hours = 12.0
+    return int(hours * 3600)
+
+
+SESSION_TTL_SECONDS = _session_ttl_seconds()
+
+# Only honour X-Forwarded-* headers when explicitly told the app sits behind a
+# trusted reverse proxy — otherwise clients could spoof their IP in the logs.
+TRUST_PROXY = _env_flag("DASHBOARD_TRUST_PROXY")
+FORCE_SECURE_COOKIE = _env_flag("DASHBOARD_COOKIE_SECURE")
+
+
+def _resolve_secret_key() -> bytes:
+    """
+    Key used to sign session cookies (and Flask's flash messages).
+
+    Priority: DASHBOARD_SECRET_KEY, then FLASK_SECRET_KEY (install.sh writes
+    the former to .env). Without either, a random per-process key is used —
+    everything still works, users just have to log in again after a restart.
+    The old hard-coded fallback would have let anyone forge a session cookie.
+    """
+    for name in ("DASHBOARD_SECRET_KEY", "FLASK_SECRET_KEY"):
+        value = os.environ.get(name, "").strip()
+        if value:
+            return value.encode("utf-8")
+    return secrets.token_bytes(32)
+
+
+SECRET_KEY = _resolve_secret_key()
+app.secret_key = SECRET_KEY
+
+# Sessions are signed with a key derived from the secret *and* the current
+# credentials, so changing the password invalidates every existing login.
+_SESSION_SIGNING_KEY = hmac.new(
+    SECRET_KEY,
+    b"autorepost-dashboard-session\0"
+    + hashlib.sha256(f"{DASHBOARD_USER}\0{DASHBOARD_PASSWORD}".encode("utf-8")).digest(),
+    hashlib.sha256,
+).digest()
+
+
+# ------------------------------------------------------------------------------
+# Authentication — audit log (shares logs/pipeline.log with the bot)
+# ------------------------------------------------------------------------------
+
+auth_logger = logging.getLogger("AutoRepost.dashboard")
+auth_logger.setLevel(logging.INFO)
+auth_logger.propagate = False
+if not auth_logger.handlers:
+    _fmt = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s", datefmt="%Y-%m-%d %H:%M:%S")
+    try:
+        _file_handler = logging.FileHandler(LOGS_PATH, encoding="utf-8")
+        _file_handler.setFormatter(_fmt)
+        auth_logger.addHandler(_file_handler)
+    except Exception:
+        # An unwritable log file must not take the dashboard down
+        pass
+    _console_handler = logging.StreamHandler()
+    _console_handler.setFormatter(_fmt)
+    auth_logger.addHandler(_console_handler)
+
+
+def auth_configured() -> bool:
+    """True when a dashboard password has been set (auth fails closed otherwise)."""
+    return bool(DASHBOARD_PASSWORD)
+
+
+def client_ip() -> str:
+    """Best-effort client address for log lines."""
+    if TRUST_PROXY:
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip() or (request.remote_addr or "unknown")
+    return request.remote_addr or "unknown"
+
+
+def _sanitize_for_log(value: str, limit: int = 64) -> str:
+    """Keep user-supplied strings from injecting fake log records."""
+    cleaned = "".join(ch for ch in (value or "") if ch.isprintable()).replace("|", "/")
+    return cleaned[:limit]
+
+
+def log_login_attempt(username: str, success: bool, method: str) -> None:
+    """Record every login attempt (success or failure) in logs/pipeline.log."""
+    outcome = "OK" if success else "FAILED"
+    message = (
+        f"Dashboard login {outcome} | user '{_sanitize_for_log(username)}' "
+        f"from {client_ip()} via {method}"
+    )
+    if success:
+        auth_logger.info(message)
+    else:
+        auth_logger.warning(message)
+
+
+# ------------------------------------------------------------------------------
+# Authentication — credential + session checks
+# ------------------------------------------------------------------------------
+
+def credentials_valid(username: str, password: str) -> bool:
+    """Constant-time comparison of a username/password pair against .env."""
+    if not auth_configured():
+        return False
+    user_ok = hmac.compare_digest((username or "").encode("utf-8"), DASHBOARD_USER.encode("utf-8"))
+    pass_ok = hmac.compare_digest((password or "").encode("utf-8"), DASHBOARD_PASSWORD.encode("utf-8"))
+    return user_ok and pass_ok
+
+
+def basic_auth_credentials():
+    """Return (username, password) from an ``Authorization: Basic`` header, or None."""
+    header = request.headers.get("Authorization", "")
+    scheme, _, encoded = header.partition(" ")
+    if scheme.lower() != "basic" or not encoded.strip():
+        return None
+    try:
+        decoded = base64.b64decode(encoded.strip(), validate=True).decode("utf-8")
+    except Exception:
+        return None
+    username, sep, password = decoded.partition(":")
+    if not sep:
+        return None
+    return username, password
+
+
+def make_session_token() -> str:
+    """``<expiry>.<hmac>`` — nothing secret inside, only a signed expiry."""
+    expires = int(time.time()) + SESSION_TTL_SECONDS
+    signature = hmac.new(_SESSION_SIGNING_KEY, str(expires).encode("ascii"), hashlib.sha256).hexdigest()
+    return f"{expires}.{signature}"
+
+
+def verify_session_token(token) -> bool:
+    if not token or not isinstance(token, str) or "." not in token:
+        return False
+    expires_str, _, signature = token.partition(".")
+    if not expires_str.isdigit() or not signature:
+        return False
+    expected = hmac.new(_SESSION_SIGNING_KEY, expires_str.encode("ascii"), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, signature):
+        return False
+    return int(expires_str) > time.time()
+
+
+def request_is_secure() -> bool:
+    if FORCE_SECURE_COOKIE or request.is_secure:
+        return True
+    if TRUST_PROXY:
+        return request.headers.get("X-Forwarded-Proto", "").split(",")[0].strip().lower() == "https"
+    return False
+
+
+def set_session_cookie(response):
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        make_session_token(),
+        max_age=SESSION_TTL_SECONDS,
+        httponly=True,
+        samesite="Lax",
+        secure=request_is_secure(),
+        path="/",
+    )
+    return response
+
+
+def clear_session_cookie(response):
+    response.delete_cookie(SESSION_COOKIE_NAME, path="/")
+    return response
+
+
+def is_authenticated() -> bool:
+    """Valid session cookie *or* valid Basic credentials on this request."""
+    if getattr(g, "auth_checked", False):
+        return bool(g.authenticated)
+    g.auth_checked = True
+    g.authenticated = False
+    g.auth_method = None
+
+    if verify_session_token(request.cookies.get(SESSION_COOKIE_NAME)):
+        g.authenticated, g.auth_method = True, "session"
+        return True
+
+    creds = basic_auth_credentials()
+    if creds is not None:
+        if credentials_valid(*creds):
+            g.authenticated, g.auth_method = True, "basic"
+            return True
+        # Wrong Basic credentials are a failed login too
+        log_login_attempt(creds[0], success=False, method="basic")
+        g.auth_method = "basic-failed"
+    return False
+
+
+def wants_html() -> bool:
+    """Browsers navigating to a page get the login form; API clients get a 401."""
+    return "text/html" in request.headers.get("Accept", "")
+
+
+def unauthorized_response():
+    body = json.dumps({"error": "unauthorized", "login": "/login"})
+    return (
+        body,
+        401,
+        {
+            "Content-Type": "application/json",
+            "WWW-Authenticate": f'Basic realm="{AUTH_REALM}", charset="UTF-8"',
+        },
+    )
+
+
+def safe_next_url(candidate) -> str:
+    """Only allow same-site relative paths in ?next= (no open redirects)."""
+    if not candidate or not isinstance(candidate, str):
+        return url_for("index")
+    if not candidate.startswith("/") or candidate.startswith("//") or candidate.startswith("/\\"):
+        return url_for("index")
+    if any(ch.isspace() or not ch.isprintable() for ch in candidate):
+        return url_for("index")
+    if candidate.split("?", 1)[0].rstrip("/") in {"/login", "/logout"}:
+        return url_for("index")
+    return candidate
+
+
+@app.before_request
+def require_dashboard_auth():
+    """Gate every request that is not explicitly public."""
+    if request.endpoint in PUBLIC_ENDPOINTS:
+        return None
+    if is_authenticated():
+        return None
+    # Basic credentials were sent but rejected: let the client retry.
+    if getattr(g, "auth_method", None) == "basic-failed":
+        return unauthorized_response()
+    if wants_html() and request.method == "GET":
+        next_url = request.full_path if request.query_string else request.path
+        return redirect(url_for("login", next=next_url.rstrip("?")))
+    return unauthorized_response()
+
+
+@app.after_request
+def no_store_for_private_pages(response):
+    """Authenticated pages must not linger in shared/browser caches after logout."""
+    if request.endpoint not in PUBLIC_ENDPOINTS and request.endpoint != "serve_thumbnail":
+        response.headers.setdefault("Cache-Control", "no-store")
+    return response
+
+
+@app.context_processor
+def inject_auth_context():
+    return {
+        "auth_user": DASHBOARD_USER,
+        "auth_method": getattr(g, "auth_method", None),
+    }
 
 
 def allowed_file(filename: str) -> bool:
@@ -116,15 +443,6 @@ def get_recent_logs(num_lines: int = 20) -> list:
             lines = f.readlines()
             # Get last N lines
             return [line.strip() for line in lines[-num_lines:] if line.strip()]
-    except Exception:
-        return []
-
-
-def read_captions_safe() -> list:
-    """Return the caption pool without raising on a missing/broken config."""
-    try:
-        captions = load_config().get("captions", [])
-        return captions if isinstance(captions, list) else []
     except Exception:
         return []
 
@@ -242,33 +560,51 @@ def index():
 
 @app.route("/healthz")
 def healthz():
-    """Lightweight liveness/readiness endpoint for supervisors and uptime checks."""
-    try:
-        config = load_config()
-        token_configured = bool(config.get("telegram_token")) and config.get(
-            "telegram_token"
-        ) != "YOUR_TELEGRAM_BOT_TOKEN"
-        key_configured = bool(config.get("zernio_api_key")) and config.get(
-            "zernio_api_key"
-        ) != "YOUR_ZERNIO_API_KEY"
-    except Exception:
-        token_configured = key_configured = False
+    """Public liveness endpoint with a deliberately minimal response."""
+    # Keep this contract stable: health monitors should not receive hostnames,
+    # token state, log counts, or any other operational information.
+    return json.dumps({"status": "ok", "auth_required": True}), 200, {"Content-Type": "application/json"}
+
+
+@app.route("/login", methods=["GET", "POST"])
+def login():
+    """Login form; a correct password sets the signed session cookie."""
+    next_url = safe_next_url(request.values.get("next"))
+
+    if request.method == "GET" and is_authenticated():
+        return redirect(next_url)
+
+    error = None
+    status = 200
+    if request.method == "POST":
+        username = request.form.get("username", "").strip()
+        password = request.form.get("password", "")
+
+        if credentials_valid(username, password):
+            log_login_attempt(username, success=True, method="form")
+            return set_session_cookie(redirect(next_url))
+
+        log_login_attempt(username, success=False, method="form")
+        error = "Invalid username or password."
+        status = 401
 
     return (
-        json.dumps(
-            {
-                "status": "ok",
-                "host": socket.gethostname(),
-                "bot_running": bot_is_running(),
-                "telegram_token_configured": token_configured,
-                "zernio_key_configured": key_configured,
-                "captions": len(read_captions_safe()),
-                "uptime_checked_at": datetime.now().isoformat(timespec="seconds"),
-            }
+        render_template(
+            "login.html",
+            error=error,
+            next_url=next_url,
+            auth_configured=auth_configured(),
+            username=request.form.get("username", "") if request.method == "POST" else "",
         ),
-        200,
-        {"Content-Type": "application/json"},
+        status,
     )
+
+
+@app.route("/logout", methods=["POST"])
+def logout():
+    """Clear the session cookie (Basic-auth clients simply stop sending the header)."""
+    flash("👋 You have been logged out.", "info")
+    return clear_session_cookie(redirect(url_for("login")))
 
 
 @app.route("/settings", methods=["GET", "POST"])
@@ -560,4 +896,13 @@ if __name__ == "__main__":
     os.makedirs(os.path.join(os.path.dirname(__file__), "templates"), exist_ok=True)
 
     print(f"🌐 Starting AutoRepost Dashboard on http://{HOST}:{PORT}")
+    if auth_configured():
+        print(f"🔒 Dashboard login enabled (user: {DASHBOARD_USER})")
+    else:
+        print(
+            "⚠️  DASHBOARD_PASSWORD is not set — nobody can log in. "
+            "Add DASHBOARD_USER / DASHBOARD_PASSWORD to .env (or re-run ./install.sh) and restart."
+        )
+    if not os.environ.get("DASHBOARD_SECRET_KEY") and not os.environ.get("FLASK_SECRET_KEY"):
+        print("ℹ️  DASHBOARD_SECRET_KEY not set — logins will not survive a restart.")
     app.run(host=HOST, port=PORT, debug=False)
