@@ -1,9 +1,20 @@
 {
   "telegram_token": "YOUR_TELEGRAM_BOT_TOKEN",
   "zernio_api_key": "YOUR_ZERNIO_API_KEY",
-  "zernio_api_base_url": "https://api.zernio.com",
+  "zernio_api_base_url": "https://zernio.com/api/v1",
+  "zernio_account_ids": {},
   "default_thumbnail": "thumbnails/default.jpg",
   "post_to": ["instagram", "tiktok"],
+  "tiktok_settings": {
+    "privacy_level": "PUBLIC_TO_EVERYONE",
+    "allow_comment": true,
+    "allow_duet": true,
+    "allow_stitch": true
+  },
+  "instagram_settings": {
+    "shareToFeed": true
+  },
+  "tiktok_cover_from_thumbnail": false,
   "captions": [
     "Follow for more 🔥",
     "Drop a comment below 👇",

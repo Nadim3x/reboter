@@ -134,9 +134,21 @@ LOGS_PATH = os.path.join(BASE_DIR, "logs", "pipeline.log")
 THUMBNAILS_DIR = os.path.join(BASE_DIR, "thumbnails")
 DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 
-# The uploader appends the upload route to this value. It is configurable from
+# Zernio API root (see https://docs.zernio.com — "Base URL"). The uploader
+# appends /accounts, /media/presign and /posts to it. It is configurable from
 # the Settings page so deployments do not need to edit Python source code.
-DEFAULT_ZERNIO_API_BASE_URL = "https://api.zernio.com"
+try:
+    from uploader import (
+        DEFAULT_ZERNIO_API_BASE_URL,
+        ZernioError,
+        list_accounts as zernio_list_accounts,
+        normalize_api_base_url as _normalize_zernio_base_url,
+    )
+except ImportError:  # requests missing — dashboard still works, minus the check
+    DEFAULT_ZERNIO_API_BASE_URL = "https://zernio.com/api/v1"
+    ZernioError = Exception  # type: ignore[misc,assignment]
+    zernio_list_accounts = None  # type: ignore[assignment]
+    _normalize_zernio_base_url = None  # type: ignore[assignment]
 
 # Ensure required directories exist
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
@@ -440,10 +452,21 @@ def mask_token(token: str) -> str:
 
 
 def normalize_api_base_url(value: str) -> str:
-    """Validate and normalize the user-configured Zernio API base URL."""
+    """
+    Validate and normalize the user-configured Zernio API base URL.
+
+    Delegates to the uploader so the dashboard saves exactly what the uploader
+    will use: ``https://zernio.com/api/v1`` for any zernio.com spelling
+    (including the legacy ``https://api.zernio.com`` and ``.../v1/upload``
+    values written by older releases), or ``<custom-host>/v1`` for a proxy.
+    """
     if not isinstance(value, str) or not value.strip():
         raise ValueError("a URL is required")
 
+    if _normalize_zernio_base_url is not None:
+        return _normalize_zernio_base_url(value)
+
+    # Fallback validation when uploader.py cannot be imported.
     url = value.strip()
     if any(character.isspace() for character in url):
         raise ValueError("the URL must not contain spaces")
@@ -463,6 +486,69 @@ def normalize_api_base_url(value: str) -> str:
         raise ValueError("do not include a query string or fragment")
 
     return url.rstrip("/")
+
+
+def zernio_connection_check(config: dict) -> dict:
+    """
+    Call ``GET /v1/accounts`` with the configured key and summarise the result
+    for the Settings page: which accounts are connected and which of the
+    platforms in ``post_to`` have (or lack) a usable account.
+    """
+    api_key = str(config.get("zernio_api_key") or "").strip()
+    post_to = [str(p).lower().strip() for p in (config.get("post_to") or []) if str(p).strip()]
+    overrides = config.get("zernio_account_ids") or {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    result = {"ok": False, "error": None, "accounts": [], "platforms": [], "base_url": None}
+
+    if not api_key or api_key in {"YOUR_ZERNIO_API_KEY", "your_zernio_api_key_here"}:
+        result["error"] = "Zernio API key is not set."
+        return result
+    if zernio_list_accounts is None:
+        result["error"] = "uploader.py could not be imported (is 'requests' installed?)."
+        return result
+
+    try:
+        base_url = normalize_api_base_url(config.get("zernio_api_base_url") or DEFAULT_ZERNIO_API_BASE_URL)
+        result["base_url"] = base_url
+        accounts = zernio_list_accounts(api_key, base_url)
+    except ValueError as e:
+        result["error"] = f"Invalid API base URL: {e}"
+        return result
+    except ZernioError as e:
+        result["error"] = str(e)
+        return result
+    except Exception as e:  # never let a network hiccup break the page
+        result["error"] = f"Unexpected error: {e}"
+        return result
+
+    result["ok"] = True
+    for account in accounts:
+        result["accounts"].append(
+            {
+                "id": str(account.get("_id") or account.get("id") or ""),
+                "platform": str(account.get("platform") or "").lower(),
+                "username": account.get("username") or account.get("displayName") or "",
+                "active": bool(account.get("isActive", True)),
+            }
+        )
+
+    for platform in post_to:
+        override = str(overrides.get(platform) or "").strip()
+        matches = [a for a in result["accounts"] if a["platform"] == platform]
+        active = [a for a in matches if a["active"]]
+        if override:
+            known = next((a for a in matches if a["id"] == override), None)
+            status = "ok" if known and known["active"] else ("inactive" if known else "unknown-id")
+            chosen = override
+        elif active:
+            status, chosen = "ok", active[0]["id"]
+        elif matches:
+            status, chosen = "inactive", matches[0]["id"]
+        else:
+            status, chosen = "missing", ""
+        result["platforms"].append({"platform": platform, "status": status, "account_id": chosen, "count": len(active)})
+    return result
 
 
 def get_recent_logs(num_lines: int = 20) -> list:
@@ -698,22 +784,47 @@ def settings():
     # GET — mask tokens for display
     telegram_token = config.get("telegram_token", "")
     zernio_api_key = config.get("zernio_api_key", "")
-    zernio_api_base_url = config.get("zernio_api_base_url", DEFAULT_ZERNIO_API_BASE_URL)
-    if not isinstance(zernio_api_base_url, str) or not zernio_api_base_url.strip():
-        zernio_api_base_url = DEFAULT_ZERNIO_API_BASE_URL
+    stored_base_url = config.get("zernio_api_base_url", DEFAULT_ZERNIO_API_BASE_URL)
+    if not isinstance(stored_base_url, str) or not stored_base_url.strip():
+        stored_base_url = DEFAULT_ZERNIO_API_BASE_URL
     else:
-        zernio_api_base_url = zernio_api_base_url.strip()
+        stored_base_url = stored_base_url.strip()
+    # Show what the uploader will actually call. Older configs hold the legacy
+    # https://api.zernio.com value; it is remapped at runtime and rewritten on save.
+    try:
+        zernio_api_base_url = normalize_api_base_url(stored_base_url)
+    except ValueError:
+        zernio_api_base_url = stored_base_url
+    legacy_base_url = stored_base_url.rstrip("/") != zernio_api_base_url.rstrip("/")
 
     masked_telegram = mask_token(telegram_token) if telegram_token else ""
     masked_zernio = mask_token(zernio_api_key) if zernio_api_key else ""
+
+    # "Check Zernio connection" button: one GET /v1/accounts call, on demand only.
+    zernio_check = None
+    if request.args.get("check_zernio"):
+        zernio_check = zernio_connection_check(config)
+
+    post_to = config.get("post_to") or []
+    if not isinstance(post_to, list):
+        post_to = []
+    account_overrides = config.get("zernio_account_ids") or {}
+    if not isinstance(account_overrides, dict):
+        account_overrides = {}
 
     return render_template(
         "settings.html",
         telegram_token=telegram_token,
         zernio_api_key=zernio_api_key,
         zernio_api_base_url=zernio_api_base_url,
+        legacy_base_url=legacy_base_url,
+        stored_base_url=stored_base_url,
+        default_base_url=DEFAULT_ZERNIO_API_BASE_URL,
         masked_telegram=masked_telegram,
         masked_zernio=masked_zernio,
+        zernio_check=zernio_check,
+        post_to=post_to,
+        account_overrides=account_overrides,
     )
 
 
