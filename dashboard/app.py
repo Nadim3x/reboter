@@ -7,10 +7,42 @@ Provides web UI to manage AutoRepost Pipeline settings, thumbnails, captions, lo
 import os
 import sys
 import json
+import socket
 from datetime import datetime
 
 # Allow importing from parent directory (for caption.py helpers)
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+
+# ------------------------------------------------------------------------------
+# .env loading (written by install.sh — DASHBOARD_HOST / DASHBOARD_PORT)
+# Kept dependency-free: no python-dotenv required.
+# ------------------------------------------------------------------------------
+
+BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+ENV_PATH = os.path.join(BASE_DIR, ".env")
+
+
+def load_dotenv(path: str = ENV_PATH) -> None:
+    """Load KEY=VALUE pairs from .env into os.environ (existing vars win)."""
+    try:
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and key not in os.environ:
+                    os.environ[key] = value
+    except Exception:
+        # A broken .env must never take the dashboard down
+        pass
+
+
+load_dotenv()
 
 from flask import Flask, render_template, request, redirect, url_for, flash, send_from_directory
 
@@ -45,10 +77,9 @@ except ImportError:
 # ------------------------------------------------------------------------------
 
 app = Flask(__name__)
-app.secret_key = "autorepost-secret-key-change-in-production"  # For flash messages
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", "autorepost-secret-key-change-in-production")
 
-# Paths
-BASE_DIR = os.path.join(os.path.dirname(__file__), "..")
+# Paths (BASE_DIR is the project root, resolved above)
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 LOGS_PATH = os.path.join(BASE_DIR, "logs", "pipeline.log")
 THUMBNAILS_DIR = os.path.join(BASE_DIR, "thumbnails")
@@ -87,6 +118,52 @@ def get_recent_logs(num_lines: int = 20) -> list:
             return [line.strip() for line in lines[-num_lines:] if line.strip()]
     except Exception:
         return []
+
+
+def read_captions_safe() -> list:
+    """Return the caption pool without raising on a missing/broken config."""
+    try:
+        captions = load_config().get("captions", [])
+        return captions if isinstance(captions, list) else []
+    except Exception:
+        return []
+
+
+def bot_is_running() -> bool:
+    """
+    Best-effort check that the Telegram bot process is alive.
+
+    1. Prefer logs/bot.pid (written by bot.py on startup).
+    2. Fall back to scanning /proc for a process running bot.py (Linux only).
+    """
+    pid_file = os.path.join(BASE_DIR, "logs", "bot.pid")
+
+    try:
+        if os.path.exists(pid_file):
+            with open(pid_file, "r", encoding="utf-8") as fh:
+                pid = int(fh.read().strip() or 0)
+            if pid > 0:
+                os.kill(pid, 0)  # raises OSError when the process is gone
+                return True
+    except Exception:
+        pass
+
+    # Fallback: look for a live `python bot.py` process
+    try:
+        for entry in os.listdir("/proc"):
+            if not entry.isdigit():
+                continue
+            try:
+                with open(f"/proc/{entry}/cmdline", "rb") as fh:
+                    cmdline = fh.read().decode("utf-8", "ignore")
+            except Exception:
+                continue
+            if "bot.py" in cmdline and "dashboard" not in cmdline:
+                return True
+    except Exception:
+        pass
+
+    return False
 
 
 def parse_log_line(line: str) -> dict:
@@ -148,9 +225,9 @@ def index():
     recent_logs_raw = get_recent_logs(20)
     recent_logs = [parse_log_line(line) for line in reversed(recent_logs_raw)]
 
-    # Pipeline running status — if dashboard runs, assume bot is running
-    # In production, you could check via PID file or health endpoint
-    pipeline_running = True
+    # Pipeline status: the dashboard and the bot are separate processes, so probe
+    # the bot's health file (written by bot.py) before claiming it is running.
+    pipeline_running = bot_is_running()
 
     return render_template(
         "index.html",
@@ -160,6 +237,37 @@ def index():
         current_thumbnail=current_thumbnail,
         recent_logs=recent_logs,
         pipeline_running=pipeline_running,
+    )
+
+
+@app.route("/healthz")
+def healthz():
+    """Lightweight liveness/readiness endpoint for supervisors and uptime checks."""
+    try:
+        config = load_config()
+        token_configured = bool(config.get("telegram_token")) and config.get(
+            "telegram_token"
+        ) != "YOUR_TELEGRAM_BOT_TOKEN"
+        key_configured = bool(config.get("zernio_api_key")) and config.get(
+            "zernio_api_key"
+        ) != "YOUR_ZERNIO_API_KEY"
+    except Exception:
+        token_configured = key_configured = False
+
+    return (
+        json.dumps(
+            {
+                "status": "ok",
+                "host": socket.gethostname(),
+                "bot_running": bot_is_running(),
+                "telegram_token_configured": token_configured,
+                "zernio_key_configured": key_configured,
+                "captions": len(read_captions_safe()),
+                "uptime_checked_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        ),
+        200,
+        {"Content-Type": "application/json"},
     )
 
 
@@ -442,6 +550,14 @@ def logs():
 # ------------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    print("🌐 Starting AutoRepost Dashboard on http://0.0.0.0:5000")
+    HOST = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+    try:
+        PORT = int(os.environ.get("DASHBOARD_PORT", "5000"))
+    except ValueError:
+        PORT = 5000
+
     # Ensure templates folder exists
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    os.makedirs(os.path.join(os.path.dirname(__file__), "templates"), exist_ok=True)
+
+    print(f"🌐 Starting AutoRepost Dashboard on http://{HOST}:{PORT}")
+    app.run(host=HOST, port=PORT, debug=False)
