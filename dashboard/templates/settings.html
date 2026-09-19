@@ -252,7 +252,7 @@
                 <div>zernio_api_base_url: {{ zernio_api_base_url or 'Not set' }}</div>
                 <div>post_to: {% if post_to %}{{ post_to | join(', ') }}{% else %}Not set{% endif %}</div>
                 <div>zernio_account_ids: {% if account_overrides %}{{ account_overrides | tojson }}{% else %}auto (first active account per platform){% endif %}</div>
-                <div class="mt-2 text-slate-500">Edit via this form or directly in config.json (tiktok_settings, instagram_settings, tiktok_cover_from_thumbnail live there too)</div>
+                <div class="mt-2 text-slate-500">Edit via this form or directly in config.json (post_to, default_thumbnail + use_thumbnail, tiktok_settings and instagram_settings live there too)</div>
             </div>
         </div>
     </div>

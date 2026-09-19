@@ -7,7 +7,7 @@ An automated video reposting pipeline that receives video links via Telegram, do
 - 📱 **Telegram Bot** — Send any video link and it auto-reposts
 - ⬇️ **Universal Downloader** — Supports YouTube, Instagram, TikTok, Facebook Reels, and 1000+ sites via yt-dlp
 - 📝 **Smart Captions** — Extracts original caption or falls back to a random caption pool
-- 🖼️ **Thumbnail Management** — Default thumbnail managed via dashboard (used for Facebook/YouTube targets or as the TikTok cover; Instagram/TikTok take no custom thumbnail via API)
+- 🖼️ **Thumbnail / Cover Management** — The default thumbnail is uploaded once and used as the post cover on every platform that supports it (Instagram Reel cover, TikTok cover, Facebook/YouTube/LinkedIn thumbnail); toggle it in the dashboard
 - 🚀 **Multi-Platform Upload** — Publishes to Instagram & TikTok (optionally Facebook & YouTube) through the official [Zernio API](https://docs.zernio.com) flow: presign → upload → `POST /v1/posts`
 - 🌐 **Web Dashboard** — Manage tokens, thumbnails, captions, and view logs at `http://localhost:5000`
 - ☁️ **Optional Cloudflare Tunnel** — Publish the local dashboard through a temporary HTTPS URL with `./start.sh --tunnel`
@@ -109,10 +109,11 @@ cp config.example.json config.json
   "zernio_api_base_url": "https://zernio.com/api/v1",
   "zernio_account_ids": {},
   "default_thumbnail": "thumbnails/default.jpg",
+  "use_thumbnail": true,
+  "post_status_wait_seconds": 120,
   "post_to": ["instagram", "tiktok"],
   "tiktok_settings": { "privacy_level": "PUBLIC_TO_EVERYONE", "allow_comment": true, "allow_duet": true, "allow_stitch": true },
   "instagram_settings": { "shareToFeed": true },
-  "tiktok_cover_from_thumbnail": false,
   "captions": ["Your captions..."]
 }
 ```
@@ -144,12 +145,15 @@ For that to work you must **connect your social accounts to Zernio once**:
 | `post_to` | Any of `instagram`, `tiktok`, `facebook`, `youtube` (the account must be connected in Zernio). |
 | `tiktok_settings` | Merged into Zernio's `tiktokSettings`. TikTok requires `privacy_level` plus the consent flags `content_preview_confirmed` / `express_consent_given` on every post — the uploader sets both to `true`, meaning **you** confirm the content before sending it to the bot. Add e.g. `"is_aigc": true` for AI-generated content. |
 | `instagram_settings` | Instagram `platformSpecificData`, e.g. `{"shareToFeed": false}` to keep a Reel out of the main feed. |
-| `tiktok_cover_from_thumbnail` | `true` uploads the default thumbnail and uses it as the TikTok video cover (`video_cover_image_url`). |
+| `default_thumbnail` | Image used as the post cover (`thumbnails/default.jpg` by default). Set it from **Dashboard → Thumbnails** ("Set as Default"). |
+| `use_thumbnail` | Default `true`: upload the thumbnail once and use it as the Instagram Reel cover, the TikTok video cover and the Facebook/YouTube/LinkedIn thumbnail. Set to `false` to post with the platform's default frame. |
+| `post_status_wait_seconds` | How long to poll `GET /v1/posts/{postId}` when a platform answers `processing`/`publishing` (default `120`, `0` disables polling). `post_status_poll_interval` sets the delay between polls (default `5`). |
 
-> ℹ️ Instagram Reels and TikTok take **no custom thumbnail** via the API; the default thumbnail is only attached for Facebook / YouTube targets (or as the TikTok cover when enabled above).
+> ℹ️ Instagram and TikTok ignore `mediaItems[].thumbnail`; the bot therefore sends your cover through the field each platform reads: `platformSpecificData.instagramThumbnail` (Instagram Reels, JPG/PNG, best at 1080x1920), `tiktokSettings.video_cover_image_url` (TikTok, JPG/PNG/WEBP up to 20 MB) and `mediaItems[].thumbnail` (Facebook / YouTube / LinkedIn). A WebP cover is skipped for Instagram (unsupported there) instead of failing the post.
+> ℹ️ The old `tiktok_cover_from_thumbnail` key is deprecated and ignored — `use_thumbnail` now controls every cover.
 > Zernio also rejects the *same video + caption* posted to the same account within 24 h (HTTP 409) — change the caption to repost.
 
-3. (Optional) Add a default thumbnail image to `thumbnails/default.jpg` or upload via dashboard later.
+3. (Optional but recommended) Add a default thumbnail image to `thumbnails/default.jpg` or upload it via the dashboard. It becomes the cover of every post (see below).
 
 ## How to Run
 
@@ -265,6 +269,25 @@ Then update `config.json` -> `default_thumbnail` to point to your file.
 
 Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 
+**How the thumbnail is used**
+
+With `use_thumbnail: true` (the default) the image is uploaded to Zernio's storage once
+per post and wired into the field each platform actually reads:
+
+| Platform | Field | Accepted formats |
+|----------|-------|------------------|
+| Instagram Reels | `platformSpecificData.instagramThumbnail` | JPG, PNG (1080x1920 recommended — Instagram crops to 9:16) |
+| TikTok | `tiktokSettings.video_cover_image_url` | JPG, PNG, WEBP (max 20 MB) |
+| Facebook / YouTube / LinkedIn | `mediaItems[].thumbnail` | JPG, PNG (max 10 MB) |
+
+- The Thumbnails page has a **covers on/off** switch (the `use_thumbnail` key). When it is
+  off, the post goes out with the platform's default frame.
+- A missing or unusable file is reported in the Telegram reply (`🖼️ Cover: none — …`)
+  instead of being silently dropped.
+- A cover that is not 9:16 is flagged in the reply, because Instagram centre-crops it.
+- `instagram_settings.instagramThumbnail` (or its alias `reelCover`) always wins over
+  `default_thumbnail` for Instagram.
+
 ## Telegram Commands
 
 | Command | Description |
@@ -274,7 +297,8 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 | `/accounts` | Show the Instagram/TikTok accounts connected to Zernio and whether every `post_to` platform is ready |
 | `/captions` | List all captions in the pool |
 | `/addcaption [text]` | Add a new caption to the pool |
-| `/thumbnail` | Show current default thumbnail filename |
+| `/thumbnail` | Show the default thumbnail, whether the file exists and whether covers are on |
+| `/poststatus [id]` | Live status of an earlier Zernio post (e.g. one that was still processing) |
 | `/help` | List all commands with descriptions |
 
 **Usage:**
@@ -329,6 +353,7 @@ All routes require a login (session cookie or HTTP Basic auth) except `/healthz`
 | `/thumbnails` | GET | List thumbnails & current default |
 | `/thumbnails/upload` | POST | Upload new thumbnail |
 | `/thumbnails/set` | POST | Set default thumbnail |
+| `/thumbnails/use-cover` | POST | Turn using the thumbnail as the post cover on/off (`use_thumbnail`) |
 | `/captions` | GET | List all captions |
 | `/captions/add` | POST | Add new caption |
 | `/captions/delete` | POST | Delete caption by index |
@@ -339,8 +364,12 @@ All routes require a login (session cookie or HTTP Basic auth) except `/healthz`
 All pipeline actions are logged to `logs/pipeline.log` with format:
 
 ```
-timestamp | url | caption_used | success/fail
+timestamp | url | caption_used | SUCCESS/PARTIAL/PENDING/FAIL | message
 ```
+
+`SUCCESS` = every platform published, `PARTIAL` = at least one published and at least
+one failed, `PENDING` = nothing published yet but Zernio is still working on it,
+`FAIL` = nothing was published.
 
 View logs via dashboard at `/logs` or:
 
@@ -360,7 +389,8 @@ Offline unit tests cover the Zernio integration (request shapes, error envelopes
 
 - [ ] Add rate limiting for Telegram bot if needed
 - [ ] Optional scheduling (`scheduledFor` / queue) instead of `publishNow`
-- [ ] Poll `GET /v1/posts/{id}` for the TikTok URL, which appears a few minutes after publishing
+- [x] Poll `GET /v1/posts/{id}` while a platform is still processing (Instagram Reels, large TikTok uploads)
+- [ ] Fetch the TikTok `platformPostUrl` later (it appears a few minutes after publishing) — use `/poststatus <id>`
 
 ## License
 
@@ -375,6 +405,10 @@ MIT License - feel free to use and modify.
 **`Video too large`** — Max 100MB. Try a shorter video.
 
 **Dashboard not loading images** — Ensure thumbnails folder exists and Flask has read permission.
+
+**`Partially posted: 1/2 platforms succeeded … Instagram: processing — check the Zernio dashboard`** — this used to be a false alarm: Zernio answers `publishNow` while Instagram is still processing, and the old code counted any non-`published` status as a failure. The uploader now polls `GET /v1/posts/{postId}` for up to `post_status_wait_seconds` and reports the real outcome (`Posted to 2/2 platforms`). If a platform is still processing at the end of that window the reply says `⏳ Still processing: Instagram` — check it later with `/poststatus <Zernio post id>`.
+
+**The post has no thumbnail / cover** — Instagram and TikTok ignore a plain video thumbnail, so the bot sends the cover through their own fields (see *How to Add Thumbnails*). Check that `/thumbnail` reports the file as found and covers as enabled — `use_thumbnail: false` (or the old, now-ignored `tiktok_cover_from_thumbnail: false`) disables them. Every reply prints a `🖼️ Cover:` line saying what was applied.
 
 **Bot not responding** — Check `logs/pipeline.log` and verify the Telegram token is correct. The public `/healthz` endpoint only confirms that the dashboard is alive; inspect the dashboard overview or logs for pipeline state.
 

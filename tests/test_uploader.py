@@ -3,13 +3,17 @@ Offline tests for uploader.py (Zernio integration).
 
 They stub ``requests`` so no network is needed and assert the calls match the
 documented Zernio flow: GET /v1/accounts -> POST /v1/media/presign -> PUT file
--> POST /v1/posts (publishNow). Run with:
+-> POST /v1/posts (publishNow), followed by GET /v1/posts/{postId} polling
+while a platform is still "processing". They also cover the cover-image fields
+(Instagram instagramThumbnail, TikTok video_cover_image_url and
+mediaItems[].thumbnail for Facebook/YouTube/LinkedIn). Run with:
 
     python3 -m unittest discover -s tests -v
 """
 
 import json
 import os
+import struct
 import sys
 import tempfile
 import unittest
@@ -40,12 +44,26 @@ ACCOUNTS = {
         {"_id": "66b2e19d8c3f5a7e9d0b1c2e", "platform": "tiktok", "username": "acme_tt", "isActive": True},
     ]
 }
+ACCOUNTS_WITH_FACEBOOK = {
+    "accounts": ACCOUNTS["accounts"] + [
+        {"_id": "66b2e19d8c3f5a7e9d0b1c2f", "platform": "facebook", "username": "acme_fb", "isActive": True},
+    ]
+}
 PRESIGN = {
     "uploadUrl": "https://bucket.r2.cloudflarestorage.com/temp/123_video.mp4?X-Amz-Signature=abc",
     "publicUrl": "https://media.zernio.com/temp/123_video.mp4",
     "key": "temp/123_video.mp4",
     "expiresIn": 3600,
 }
+THUMB_URL = "https://media.zernio.com/temp/123_default.png"
+THUMB_PRESIGN = dict(PRESIGN, publicUrl=THUMB_URL,
+                     uploadUrl="https://bucket.r2.cloudflarestorage.com/temp/123_default.png?X-Amz-Signature=def",
+                     key="temp/123_default.png")
+
+PUBLISHED_BOTH = {"post": {"_id": "p1", "status": "published", "platforms": [
+    {"platform": "instagram", "accountId": "66b2e19d8c3f5a7e9d0b1c2d", "status": "published"},
+    {"platform": "tiktok", "accountId": "66b2e19d8c3f5a7e9d0b1c2e", "status": "published"},
+]}}
 
 
 def base_config(**overrides):
@@ -59,6 +77,35 @@ def base_config(**overrides):
     }
     cfg.update(overrides)
     return cfg
+
+
+def png_bytes(width, height):
+    """Minimal PNG header carrying real IHDR dimensions."""
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + struct.pack(">I", 13) + b"IHDR"
+        + struct.pack(">II", width, height)
+        + b"\x08\x06\x00\x00\x00"
+    )
+
+
+def jpeg_bytes(width, height):
+    """SOI + APP0 + SOF0 — enough for image_dimensions()."""
+    app0 = b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00"
+    sof0 = (
+        b"\xff\xc0" + struct.pack(">H", 17) + b"\x08"
+        + struct.pack(">HH", height, width)
+        + b"\x03\x01\x11\x00\x02\x11\x01\x03\x11\x01"
+    )
+    return b"\xff\xd8" + app0 + sof0 + b"\xff\xd9"
+
+
+def write_thumbnail(directory, name="default.png", width=1080, height=1920):
+    path = os.path.join(directory, name)
+    data = jpeg_bytes(width, height) if name.lower().endswith((".jpg", ".jpeg")) else png_bytes(width, height)
+    with open(path, "wb") as fh:
+        fh.write(data)
+    return path
 
 
 class NormalizeBaseUrlTests(unittest.TestCase):
@@ -89,6 +136,35 @@ class NormalizeBaseUrlTests(unittest.TestCase):
                          "https://zernio.com/api/v1/media/presign")
 
 
+class ImageDimensionTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_reads_png_and_jpeg_sizes(self):
+        png = write_thumbnail(self.tmp.name, "a.png", 1080, 1920)
+        jpg = write_thumbnail(self.tmp.name, "b.jpg", 1920, 1080)
+        self.assertEqual(uploader.image_dimensions(png), (1080, 1920))
+        self.assertEqual(uploader.image_dimensions(jpg), (1920, 1080))
+
+    def test_unreadable_file_returns_none(self):
+        broken = os.path.join(self.tmp.name, "broken.png")
+        with open(broken, "wb") as fh:
+            fh.write(b"not an image at all")
+        self.assertIsNone(uploader.image_dimensions(broken))
+        self.assertIsNone(uploader.image_dimensions(os.path.join(self.tmp.name, "missing.png")))
+
+    def test_cover_note_only_for_non_vertical_images(self):
+        vertical = write_thumbnail(self.tmp.name, "v.png", 1080, 1920)
+        square = write_thumbnail(self.tmp.name, "s.png", 1080, 1080)
+        self.assertIsNone(uploader._cover_note(vertical, ["instagram", "tiktok"]))
+        self.assertIn("9:16", uploader._cover_note(square, ["instagram", "tiktok"]))
+        # No Instagram target -> nothing to warn about
+        self.assertIsNone(uploader._cover_note(square, ["tiktok"]))
+
+
 class UploadVideoFlowTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -100,8 +176,13 @@ class UploadVideoFlowTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, config, responses, put_status=200):
-        """Drive upload_video with scripted API responses; record every call."""
+    def _run(self, config, responses, put_status=200, thumbnail=None, monotonic=None):
+        """Drive upload_video with scripted API responses; record every call.
+
+        ``thumbnail`` is the explicit path passed to upload_video (bot.py always
+        passes the configured one); ``monotonic`` overrides time.monotonic so a
+        still-processing post can be tested without real waiting.
+        """
         queue = list(responses)
 
         def fake_request(method, url, headers=None, timeout=None, **kw):
@@ -115,10 +196,18 @@ class UploadVideoFlowTests(unittest.TestCase):
             self.calls.append({"method": "PUT", "url": url, "headers": headers, "size": len(body), "timeout": timeout})
             return FakeResponse(put_status, None, text="")
 
-        with mock.patch.object(uploader, "load_config", return_value=config), \
-             mock.patch.object(uploader.requests, "request", side_effect=fake_request), \
-             mock.patch.object(uploader.requests, "put", side_effect=fake_put):
-            return uploader.upload_video(self.video, "Follow for more 🔥", None)
+        patches = [
+            mock.patch.object(uploader, "load_config", return_value=config),
+            mock.patch.object(uploader.requests, "request", side_effect=fake_request),
+            mock.patch.object(uploader.requests, "put", side_effect=fake_put),
+            mock.patch("time.sleep"),   # the status polling loop must not really wait
+        ]
+        if monotonic is not None:
+            patches.append(mock.patch.object(uploader.time, "monotonic", side_effect=monotonic))
+        for patcher in patches:
+            patcher.start()
+            self.addCleanup(patcher.stop)
+        return uploader.upload_video(self.video, "Follow for more 🔥", thumbnail)
 
     def test_happy_path_uses_documented_flow(self):
         created = {
@@ -168,6 +257,9 @@ class UploadVideoFlowTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertEqual(result["instagram"], "posted — https://www.instagram.com/p/DGx7Yk2ScAb/")
         self.assertEqual(result["tiktok"], "posted")
+        self.assertEqual(result["posted"], ["instagram", "tiktok"])
+        self.assertEqual(result["pending"], [])
+        self.assertEqual(result["failed"], [])
         self.assertEqual(result["post_id"], "65f1c0a9e2b5af0012ab34cd")
         self.assertTrue(result["message"].startswith("Posted to 2/2 platforms"))
 
@@ -203,7 +295,84 @@ class UploadVideoFlowTests(unittest.TestCase):
         self.assertTrue(result["success"])
         self.assertTrue(result["instagram"].startswith("posted"))
         self.assertEqual(result["tiktok"], "failed: TikTok direct posting is at capacity right now [platform_capacity]")
+        self.assertEqual(result["failed"], ["tiktok"])
         self.assertTrue(result["message"].startswith("Partially posted: 1/2"))
+
+    def test_processing_platform_is_polled_until_published(self):
+        """The bug report: Instagram answered "processing" -> it was reported as a failure."""
+        created = {"post": {"_id": "p5", "status": "publishing", "platforms": [
+            {"platform": "instagram", "accountId": "66b2e19d8c3f5a7e9d0b1c2d", "status": "processing"},
+            {"platform": "tiktok", "accountId": "66b2e19d8c3f5a7e9d0b1c2e", "status": "published"},
+        ]}}
+        # GET /v1/posts/{postId} returns accountId as an object, not a string
+        refreshed = {"post": {"_id": "p5", "status": "published", "platforms": [
+            {"platform": "instagram", "accountId": {"_id": "66b2e19d8c3f5a7e9d0b1c2d"}, "status": "published",
+             "platformPostUrl": "https://www.instagram.com/reel/abc/"},
+            {"platform": "tiktok", "accountId": {"_id": "66b2e19d8c3f5a7e9d0b1c2e"}, "status": "published"},
+        ]}}
+
+        result = self._run(base_config(), [
+            FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+            FakeResponse(201, created), FakeResponse(200, refreshed),
+        ])
+
+        self.assertEqual([c["method"] for c in self.calls], ["GET", "POST", "PUT", "POST", "GET"])
+        self.assertEqual(self.calls[-1]["url"], "https://zernio.com/api/v1/posts/p5")
+        self.assertEqual(result["pending"], [])
+        self.assertEqual(result["failed"], [])
+        self.assertEqual(result["instagram"], "posted — https://www.instagram.com/reel/abc/")
+        self.assertEqual(result["post_status"], "published")
+        self.assertTrue(result["message"].startswith("Posted to 2/2 platforms"))
+
+    def test_still_publishing_post_is_reported_as_processing_not_failure(self):
+        created = {"post": {"_id": "p7", "status": "publishing", "platforms": [
+            {"platform": "instagram", "accountId": "66b2e19d8c3f5a7e9d0b1c2d", "status": "processing"},
+            {"platform": "tiktok", "accountId": "66b2e19d8c3f5a7e9d0b1c2e", "status": "published"},
+        ]}}
+        still = {"post": {"_id": "p7", "status": "publishing", "platforms": [
+            {"platform": "instagram", "status": "processing"},
+            {"platform": "tiktok", "status": "published"},
+        ]}}
+
+        # time.monotonic: first call sets the deadline, the second jumps past it
+        result = self._run(
+            base_config(post_status_wait_seconds=120),
+            [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+             FakeResponse(201, created), FakeResponse(200, still)],
+            monotonic=[0.0, 1000.0],
+        )
+
+        self.assertTrue(result["success"])                      # TikTok published
+        self.assertEqual(result["posted"], ["tiktok"])
+        self.assertEqual(result["pending"], ["instagram"])
+        self.assertEqual(result["failed"], [])                  # not a failure any more
+        self.assertEqual(result["instagram"], "processing — check the Zernio dashboard")
+        self.assertIn("still processing", result["message"])
+        self.assertNotIn("Partially posted", result["message"])
+        self.assertEqual(result["post_status"], "publishing")
+
+    def test_status_polling_disabled_with_zero_wait(self):
+        created = {"post": {"_id": "p8", "status": "publishing", "platforms": [
+            {"platform": "instagram", "status": "processing"},
+            {"platform": "tiktok", "status": "published"},
+        ]}}
+        result = self._run(base_config(post_status_wait_seconds=0),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN), FakeResponse(201, created)])
+        self.assertEqual([c["method"] for c in self.calls], ["GET", "POST", "PUT", "POST"])  # no GET /posts/{id}
+        self.assertEqual(result["pending"], ["instagram"])
+
+    def test_status_poll_failure_keeps_the_create_response(self):
+        created = {"post": {"_id": "p9", "status": "publishing", "platforms": [
+            {"platform": "instagram", "status": "processing"},
+            {"platform": "tiktok", "status": "published"},
+        ]}}
+        gone = {"error": "Post not found", "type": "not_found", "code": "post_not_found"}
+        result = self._run(base_config(),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+                            FakeResponse(201, created), FakeResponse(404, gone)])
+        self.assertEqual(result["pending"], ["instagram"])
+        self.assertEqual(result["posted"], ["tiktok"])
+        self.assertTrue(result["success"])
 
     def test_endpoint_not_found_gives_actionable_hint(self):
         """The exact failure users saw with the old code, now surfaced with a fix hint."""
@@ -266,35 +435,102 @@ class UploadVideoFlowTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertIn("Unsupported video format .mkv", result["message"])
 
-    def test_thumbnail_only_uploaded_when_a_platform_can_use_it(self):
-        thumb = os.path.join(self.tmp.name, "default.jpg")
-        with open(thumb, "wb") as fh:
-            fh.write(b"\xff\xd8" * 10)
-        created = {"post": {"_id": "p4", "status": "published", "platforms": [
-            {"platform": "instagram", "status": "published"}, {"platform": "tiktok", "status": "published"}]}}
+    # -- covers -----------------------------------------------------------------
 
-        # Instagram + TikTok only: the thumbnail is not uploaded (IG/TikTok ignore it)
-        with mock.patch.object(uploader, "load_config", return_value=base_config(default_thumbnail=thumb)), \
-             mock.patch.object(uploader.requests, "request",
-                               side_effect=[FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN), FakeResponse(201, created)]) as req, \
-             mock.patch.object(uploader.requests, "put", return_value=FakeResponse(200, None, text="")) as put:
-            uploader.upload_video(self.video, "c", thumb)
-        self.assertEqual(put.call_count, 1)
-        self.assertNotIn("thumbnail", req.call_args_list[2].kwargs["json"]["mediaItems"][0])
+    def test_thumbnail_becomes_the_cover_for_instagram_and_tiktok(self):
+        thumb = write_thumbnail(self.tmp.name)          # 1080x1920 PNG
+        result = self._run(base_config(default_thumbnail=thumb),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+                            FakeResponse(200, THUMB_PRESIGN), FakeResponse(201, PUBLISHED_BOTH)],
+                           thumbnail=thumb)
 
-        # tiktok_cover_from_thumbnail: thumbnail is uploaded and used as the TikTok cover
-        thumb_presign = dict(PRESIGN, publicUrl="https://media.zernio.com/temp/thumb.jpg")
-        with mock.patch.object(uploader, "load_config",
-                               return_value=base_config(default_thumbnail=thumb, tiktok_cover_from_thumbnail=True)), \
-             mock.patch.object(uploader.requests, "request",
-                               side_effect=[FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
-                                            FakeResponse(200, thumb_presign), FakeResponse(201, created)]) as req, \
-             mock.patch.object(uploader.requests, "put", return_value=FakeResponse(200, None, text="")) as put:
-            uploader.upload_video(self.video, "c", thumb)
-        self.assertEqual(put.call_count, 2)
-        body = req.call_args_list[3].kwargs["json"]
-        self.assertEqual(body["tiktokSettings"]["video_cover_image_url"], "https://media.zernio.com/temp/thumb.jpg")
+        # video presign + PUT, cover presign + PUT, then the post itself
+        self.assertEqual([c["method"] for c in self.calls], ["GET", "POST", "PUT", "POST", "PUT", "POST"])
+        body = self.calls[-1]["json"]
+        # Instagram and TikTok ignore mediaItems[].thumbnail …
         self.assertNotIn("thumbnail", body["mediaItems"][0])
+        # … so the cover goes into the field each platform actually reads.
+        self.assertEqual(body["platforms"][0]["platformSpecificData"], {"instagramThumbnail": THUMB_URL})
+        self.assertEqual(body["tiktokSettings"]["video_cover_image_url"], THUMB_URL)
+        self.assertEqual(result["thumbnail"]["platforms"], ["instagram", "tiktok"])
+        self.assertIsNone(result["thumbnail"]["note"])   # already 9:16
+
+    def test_incorrectly_shaped_cover_is_flagged_in_the_result(self):
+        thumb = write_thumbnail(self.tmp.name, "wide.png", 1920, 1080)
+        result = self._run(base_config(default_thumbnail=thumb),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+                            FakeResponse(200, THUMB_PRESIGN), FakeResponse(201, PUBLISHED_BOTH)],
+                           thumbnail=thumb)
+        self.assertIn("9:16", result["thumbnail"]["note"])
+
+    def test_use_thumbnail_false_posts_without_a_cover(self):
+        thumb = write_thumbnail(self.tmp.name)
+        result = self._run(base_config(default_thumbnail=thumb, use_thumbnail=False),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN), FakeResponse(201, PUBLISHED_BOTH)],
+                           thumbnail=thumb)
+        self.assertEqual([c["method"] for c in self.calls], ["GET", "POST", "PUT", "POST"])
+        body = self.calls[-1]["json"]
+        self.assertNotIn("thumbnail", body["mediaItems"][0])
+        self.assertNotIn("platformSpecificData", body["platforms"][0])
+        self.assertNotIn("video_cover_image_url", body["tiktokSettings"])
+        self.assertEqual(result["thumbnail"]["platforms"], [])
+        self.assertIn("use_thumbnail", result["thumbnail"]["note"])
+
+    def test_legacy_tiktok_cover_flag_is_ignored(self):
+        """tiktok_cover_from_thumbnail is deprecated; use_thumbnail decides."""
+        thumb = write_thumbnail(self.tmp.name)
+        result = self._run(base_config(default_thumbnail=thumb, tiktok_cover_from_thumbnail=False),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+                            FakeResponse(200, THUMB_PRESIGN), FakeResponse(201, PUBLISHED_BOTH)],
+                           thumbnail=thumb)
+        body = self.calls[-1]["json"]
+        self.assertEqual(body["tiktokSettings"]["video_cover_image_url"], THUMB_URL)
+        self.assertEqual(result["thumbnail"]["platforms"], ["instagram", "tiktok"])
+
+    def test_webp_cover_is_used_for_tiktok_only(self):
+        thumb = write_thumbnail(self.tmp.name, "cover.webp")
+        result = self._run(base_config(default_thumbnail=thumb),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+                            FakeResponse(200, THUMB_PRESIGN), FakeResponse(201, PUBLISHED_BOTH)],
+                           thumbnail=thumb)
+        body = self.calls[-1]["json"]
+        # Instagram only accepts JPEG/PNG covers, so it is skipped instead of failing the post
+        self.assertNotIn("platformSpecificData", body["platforms"][0])
+        self.assertEqual(body["tiktokSettings"]["video_cover_image_url"], THUMB_URL)
+        self.assertEqual(result["thumbnail"]["platforms"], ["tiktok"])
+
+    def test_custom_cover_in_instagram_settings_wins(self):
+        thumb = write_thumbnail(self.tmp.name)
+        config = base_config(
+            default_thumbnail=thumb,
+            instagram_settings={"shareToFeed": False, "instagramThumbnail": "https://cdn.example.com/mine.jpg"},
+        )
+        self._run(config, [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN),
+                           FakeResponse(200, THUMB_PRESIGN), FakeResponse(201, PUBLISHED_BOTH)],
+                  thumbnail=thumb)
+        entry = self.calls[-1]["json"]["platforms"][0]
+        self.assertEqual(entry["platformSpecificData"]["instagramThumbnail"], "https://cdn.example.com/mine.jpg")
+        self.assertFalse(entry["platformSpecificData"]["shareToFeed"])
+
+    def test_facebook_target_gets_the_media_item_thumbnail(self):
+        thumb = write_thumbnail(self.tmp.name)
+        created = {"post": {"_id": "p6", "status": "published", "platforms": [
+            {"platform": "instagram", "status": "published"},
+            {"platform": "facebook", "status": "published"}]}}
+        result = self._run(base_config(post_to=["instagram", "facebook"], default_thumbnail=thumb),
+                           [FakeResponse(200, ACCOUNTS_WITH_FACEBOOK), FakeResponse(200, PRESIGN),
+                            FakeResponse(200, THUMB_PRESIGN), FakeResponse(201, created)],
+                           thumbnail=thumb)
+        body = self.calls[-1]["json"]
+        self.assertEqual(body["mediaItems"][0]["thumbnail"], THUMB_URL)
+        self.assertNotIn("tiktokSettings", body)
+        self.assertIn("facebook", result["thumbnail"]["platforms"])
+
+    def test_missing_thumbnail_is_reported_in_the_result(self):
+        result = self._run(base_config(default_thumbnail=os.path.join(self.tmp.name, "nope.png")),
+                           [FakeResponse(200, ACCOUNTS), FakeResponse(200, PRESIGN), FakeResponse(201, PUBLISHED_BOTH)])
+        self.assertEqual(result["thumbnail"]["platforms"], [])
+        self.assertIn("not found", result["thumbnail"]["note"])
 
 
 class ListAccountsTests(unittest.TestCase):

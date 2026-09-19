@@ -4,6 +4,8 @@
   "zernio_api_base_url": "https://zernio.com/api/v1",
   "zernio_account_ids": {},
   "default_thumbnail": "thumbnails/default.jpg",
+  "use_thumbnail": true,
+  "post_status_wait_seconds": 120,
   "post_to": ["instagram", "tiktok"],
   "tiktok_settings": {
     "privacy_level": "PUBLIC_TO_EVERYONE",
@@ -14,7 +16,6 @@
   "instagram_settings": {
     "shareToFeed": true
   },
-  "tiktok_cover_from_thumbnail": false,
   "captions": [
     "Follow for more 🔥",
     "Drop a comment below 👇",

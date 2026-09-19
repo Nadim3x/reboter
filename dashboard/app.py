@@ -140,15 +140,27 @@ DOWNLOADS_DIR = os.path.join(BASE_DIR, "downloads")
 try:
     from uploader import (
         DEFAULT_ZERNIO_API_BASE_URL,
+        COVER_RULES,
         ZernioError,
         list_accounts as zernio_list_accounts,
         normalize_api_base_url as _normalize_zernio_base_url,
+        thumbnail_enabled,
     )
+    # Platforms that accept a custom cover image (Instagram Reel cover, TikTok
+    # cover, Facebook/YouTube/LinkedIn thumbnail).
+    COVER_PLATFORMS = set(COVER_RULES)
 except ImportError:  # requests missing — dashboard still works, minus the check
     DEFAULT_ZERNIO_API_BASE_URL = "https://zernio.com/api/v1"
     ZernioError = Exception  # type: ignore[misc,assignment]
     zernio_list_accounts = None  # type: ignore[assignment]
     _normalize_zernio_base_url = None  # type: ignore[assignment]
+    COVER_PLATFORMS = {"instagram", "tiktok", "facebook", "youtube", "linkedin"}
+
+    def thumbnail_enabled(config: dict) -> bool:  # type: ignore[misc]
+        value = config.get("use_thumbnail", True)
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
 
 # Ensure required directories exist
 os.makedirs(THUMBNAILS_DIR, exist_ok=True)
@@ -867,11 +879,42 @@ def thumbnails():
     # Sort by modified time newest first
     thumbnail_files.sort(key=lambda x: x["mtime"], reverse=True)
 
+    # Whether the default thumbnail is actually used as the post cover.
+    # (config is undefined when load_config() above raised.)
+    try:
+        use_thumbnail = thumbnail_enabled(config)
+        cover_platforms = [p for p in (config.get("post_to") or []) if p in COVER_PLATFORMS]
+    except Exception:
+        use_thumbnail = True
+        cover_platforms = []
+
     return render_template(
         "thumbnails.html",
         thumbnails=thumbnail_files,
         current_default=current_default,
+        use_thumbnail=use_thumbnail,
+        cover_platforms=cover_platforms,
     )
+
+
+@app.route("/thumbnails/use-cover", methods=["POST"])
+def set_use_thumbnail():
+    """Enable/disable using the default thumbnail as the post cover."""
+    use_thumbnail = str(request.form.get("use_thumbnail", "")).strip().lower() in {"1", "true", "on", "yes"}
+    try:
+        config = load_config()
+        config["use_thumbnail"] = use_thumbnail
+        # The legacy key only ever controlled the TikTok cover; drop it so
+        # use_thumbnail is the single switch.
+        config.pop("tiktok_cover_from_thumbnail", None)
+        save_config(config)
+        if use_thumbnail:
+            flash("✅ Covers enabled — the default thumbnail is used as the Instagram Reel cover and the TikTok cover.", "success")
+        else:
+            flash("⛔ Covers disabled — posts go out with the platform's default frame.", "info")
+    except Exception as e:
+        flash(f"❌ Failed to update config: {e}", "error")
+    return redirect(url_for("thumbnails"))
 
 
 @app.route("/thumbnails/upload", methods=["POST"])

@@ -30,6 +30,10 @@ from caption import get_caption, load_config, save_config
 from uploader import (
     upload_video,
     list_accounts,
+    get_post,
+    platform_outcome,
+    resolve_thumbnail_path,
+    thumbnail_enabled,
     normalize_api_base_url,
     ZernioError,
     PLACEHOLDER_API_KEYS,
@@ -229,14 +233,83 @@ async def addcaption_command(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def thumbnail_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /thumbnail — show filename of current default thumbnail."""
+    """Handle /thumbnail — show the default thumbnail and where it is applied."""
     try:
         config = load_config()
         thumb = config.get("default_thumbnail", "Not set")
-        await update.message.reply_text(f"🖼️ Current default thumbnail: {thumb}")
+        enabled = thumbnail_enabled(config)
+        resolved = resolve_thumbnail_path(thumb)
+
+        # Plain text: thumbnails paths and error messages may contain
+        # characters that Telegram's Markdown parser rejects.
+        lines = [f"🖼️ Default thumbnail: {thumb}"]
+        lines.append("File: ✅ found" if resolved else "File: ❌ not found — upload it in the dashboard → Thumbnails")
+        if not enabled:
+            lines.append(
+                "Covers: ⛔ disabled (use_thumbnail: false in config.json) — posts go out "
+                "with the platform's default frame."
+            )
+        else:
+            lines.append("Covers: ✅ enabled — the image is used as the Instagram Reel cover and the TikTok cover,")
+            lines.append("and as the Facebook/YouTube thumbnail. Instagram requires JPG/PNG and crops to 9:16 (1080x1920).")
+        await update.message.reply_text("\n".join(lines))
     except Exception as e:
         logger.error(f"Error in /thumbnail: {e}\n{traceback.format_exc()}")
         await update.message.reply_text(f"❌ Error: {e}")
+
+
+def _describe_zernio_post(post_id: str) -> str:
+    """Blocking helper for /poststatus: read one Zernio post (runs in a thread)."""
+    config = load_config()
+    api_key = str(config.get("zernio_api_key") or "").strip()
+    if api_key in PLACEHOLDER_API_KEYS:
+        return "❌ Zernio API key is not configured. Set it in the dashboard → Settings."
+
+    base_url = normalize_api_base_url(config.get("zernio_api_base_url"))
+    post = get_post(api_key, base_url, post_id)
+
+    status = str(post.get("status") or "unknown")
+    lines = [f"📄 Zernio post {post_id}", f"Status: {status}"]
+
+    content = str(post.get("content") or "").strip().replace("\n", " ")
+    if content:
+        lines.append(f"Caption: {content[:120]}{'…' if len(content) > 120 else ''}")
+
+    entries = post.get("platforms") if isinstance(post.get("platforms"), list) else []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        platform = str(entry.get("platform") or "?").lower()
+        # Instagram shows the post url once it is live (or "processing" while it does not)
+        state, text = platform_outcome(entry)
+        icon = {"posted": "✅", "pending": "⏳"}.get(state, "❌")
+        lines.append(f"{icon} {PLATFORM_LABELS.get(platform, platform.title())}: {text}")
+    if not entries:
+        lines.append("(Zernio returned no per-platform entries yet)")
+    if status in {"failed", "partial"}:
+        lines.append("")
+        lines.append("Retry the failed platforms from the Zernio dashboard (POST /v1/posts/{id}/retry).")
+    return "\n".join(lines)
+
+
+async def poststatus_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handle /poststatus <postId> — current state of an earlier Zernio post."""
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: /poststatus <Zernio post id>\n"
+            "The id is in every result message, e.g. /poststatus 6aaeaefbdab9264168639dc8"
+        )
+        return
+    post_id = context.args[0].strip()
+    try:
+        text = await asyncio.to_thread(_describe_zernio_post, post_id)
+    except ZernioError as e:
+        text = f"❌ Zernio error: {e}"
+    except Exception as e:
+        logger.error(f"Error in /poststatus: {e}\n{traceback.format_exc()}")
+        text = f"❌ Error: {e}"
+    await update.message.reply_text(text[:4000], disable_web_page_preview=True)
+    logger.info(f"/poststatus command from user {update.effective_user.id}: {post_id}")
 
 
 def _describe_zernio_accounts() -> str:
@@ -299,14 +372,105 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "/start — Welcome message\n"
         "/status — Check if pipeline is running\n"
         "/accounts — Show Instagram/TikTok accounts connected to Zernio\n"
+        "/poststatus [id] — Check a Zernio post (e.g. one still publishing)\n"
         "/captions — List all captions in pool\n"
         "/addcaption [text] — Add new caption to pool\n"
-        "/thumbnail — Show current default thumbnail\n"
+        "/thumbnail — Show current default thumbnail and where it is used\n"
         "/help — Show this help message\n\n"
         "📎 *How to use:*\n"
         "Just send any video link (YouTube, TikTok, Instagram, Facebook, etc.) and I'll download and repost it automatically!"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
+
+
+# ------------------------------------------------------------------------------
+# Result formatting
+# ------------------------------------------------------------------------------
+
+def _platform_labels(platforms) -> list:
+    """Display names for a list of platform keys."""
+    return [PLATFORM_LABELS.get(str(p).lower(), str(p).title()) for p in (platforms or [])]
+
+
+def format_upload_reply(upload_result: dict, caption: str) -> tuple:
+    """Turn an ``upload_video`` result into the Telegram reply text.
+
+    Returns ``(reply_text, log_state)`` where ``log_state`` is one of
+    SUCCESS / PARTIAL / PENDING / FAIL for the log line. A platform that Zernio
+    is still publishing is reported as "still processing" — never as a failure —
+    and the cover line shows whether the thumbnail actually made it into the post.
+    """
+    message = upload_result.get("message", "Unknown result")
+    platforms = upload_result.get("platforms") or ["instagram", "tiktok"]
+    platform_lines = "\n".join(
+        f"{PLATFORM_LABELS.get(p, str(p).title())}: {upload_result.get(p, 'unknown')}" for p in platforms
+    )
+
+    posted_to = _platform_labels(upload_result.get("posted"))
+    pending_on = _platform_labels(upload_result.get("pending"))
+    failed_on = _platform_labels(upload_result.get("failed"))
+
+    thumb_info = upload_result.get("thumbnail") or {}
+    thumb_applied = thumb_info.get("platforms") or []
+    if thumb_applied:
+        cover_line = f"\n🖼️ Cover: {thumb_info.get('name')} → {', '.join(_platform_labels(thumb_applied))}"
+        if thumb_info.get("note"):
+            cover_line += f"\nℹ️ {thumb_info['note']}"
+    else:
+        cover_line = f"\n🖼️ Cover: none — {thumb_info.get('note') or 'no default thumbnail configured'}"
+
+    if posted_to and not pending_on and not failed_on:
+        headline = "✅ Posted to " + " & ".join(posted_to) + "!"
+        success = True
+    elif posted_to:
+        details = []
+        if pending_on:
+            details.append("still publishing: " + ", ".join(pending_on))
+        if failed_on:
+            details.append("failed: " + ", ".join(failed_on))
+        headline = "⚠️ Posted to " + " & ".join(posted_to) + " (" + " · ".join(details) + ")"
+        success = True
+    elif pending_on:
+        headline = "⏳ Still processing: " + ", ".join(pending_on)
+        success = False
+    else:
+        headline = "❌ Upload failed"
+        success = False
+
+    if success and not pending_on and not failed_on:
+        log_state = "SUCCESS"
+    elif success:
+        log_state = "PARTIAL"
+    elif pending_on:
+        log_state = "PENDING"
+    else:
+        log_state = "FAIL"
+
+    if success or pending_on:
+        reply_text = (
+            f"{headline}\n"
+            f"📝 Caption: {caption}\n\n"
+            f"📊 {message}\n"
+            f"{platform_lines}"
+            f"{cover_line}"
+        )
+    else:
+        reply_text = (
+            f"{headline}\n"
+            f"{message}\n"
+            f"{platform_lines}\n\n"
+            f"📝 Caption was: {caption}"
+            f"{cover_line}"
+        )
+
+    post_id = upload_result.get("post_id")
+    if pending_on and post_id:
+        reply_text += f"\n\n💡 Check again in a minute with /poststatus {post_id}"
+
+    # Telegram caps messages at 4096 characters.
+    if len(reply_text) > 4000:
+        reply_text = reply_text[:3990] + "…"
+    return reply_text, log_state
 
 
 # ------------------------------------------------------------------------------
@@ -396,48 +560,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 logger.warning(f"Failed to delete temp file {video_path}: {e}")
 
         # Step 6: Report result
-        success = upload_result.get("success", False)
         message_text_result = upload_result.get("message", "Unknown result")
+        reply_text, log_state = format_upload_reply(upload_result, final_caption)
 
-        # Per-platform lines (the uploader always includes instagram + tiktok,
-        # plus anything else listed in post_to).
-        platforms = upload_result.get("platforms") or ["instagram", "tiktok"]
-        platform_lines = "\n".join(
-            f"{PLATFORM_LABELS.get(p, p.title())}: {upload_result.get(p, 'unknown')}" for p in platforms
-        )
-        posted_to = [
-            PLATFORM_LABELS.get(p, p.title())
-            for p in platforms
-            if str(upload_result.get(p, "")).startswith("posted")
-        ]
-
-        # Log entry: timestamp | url | caption_used | success/fail
+        # Log entry: timestamp | url | caption_used | SUCCESS/PARTIAL/PENDING/FAIL
         timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         # Escape pipe in caption for log parsing
         safe_caption = final_caption.replace("|", "/").replace("\n", " ")[:200]
-        log_entry = f"{timestamp} | {url} | {safe_caption} | {'SUCCESS' if success else 'FAIL'} | {message_text_result}"
+        log_entry = f"{timestamp} | {url} | {safe_caption} | {log_state} | {message_text_result}"
         logger.info(log_entry)
 
-        if success:
-            headline = "✅ Posted to " + (" & ".join(posted_to) if posted_to else "Zernio") + "!"
-            if len(posted_to) < len(platforms):
-                headline = "⚠️ Partially posted (" + ", ".join(posted_to) + ")"
-            reply_text = (
-                f"{headline}\n"
-                f"📝 Caption: {final_caption}\n\n"
-                f"📊 {message_text_result}\n"
-                f"{platform_lines}"
-            )
-        else:
-            reply_text = (
-                f"❌ Upload failed:\n"
-                f"{message_text_result}\n"
-                f"{platform_lines}\n\n"
-                f"📝 Caption was: {final_caption}"
-            )
-        # Telegram caps messages at 4096 characters.
-        if len(reply_text) > 4000:
-            reply_text = reply_text[:3990] + "…"
         try:
             await status_msg.edit_text(reply_text, disable_web_page_preview=True)
         except Exception:
@@ -534,6 +666,7 @@ def main() -> None:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
     application.add_handler(CommandHandler("accounts", accounts_command))
+    application.add_handler(CommandHandler("poststatus", poststatus_command))
     application.add_handler(CommandHandler("captions", captions_command))
     application.add_handler(CommandHandler("addcaption", addcaption_command))
     application.add_handler(CommandHandler("thumbnail", thumbnail_command))
