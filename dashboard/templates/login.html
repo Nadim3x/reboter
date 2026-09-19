@@ -1,0 +1,86 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="robots" content="noindex, nofollow">
+    <title>Sign in — AutoRepost Pipeline</title>
+    <!-- Tailwind CSS via CDN (same as base.html) -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body {
+            background-color: #0f172a;
+            color: white;
+        }
+    </style>
+</head>
+<body class="bg-[#0f172a] text-white min-h-screen flex items-center justify-center px-4">
+
+    <main class="w-full max-w-md">
+        <!-- Logo / Title -->
+        <div class="text-center mb-8">
+            <h1 class="text-3xl font-bold flex items-center justify-center gap-2">
+                <span>🎬</span> AutoRepost
+            </h1>
+            <p class="text-sm text-slate-400 mt-2">Sign in to manage the pipeline</p>
+        </div>
+
+        <div class="bg-[#1e293b] border border-[#334155] rounded-xl p-8 shadow-xl">
+
+            {% with messages = get_flashed_messages(with_categories=true) %}
+                {% for category, message in messages %}
+                    <div class="mb-4 p-3 rounded-lg bg-blue-900/50 border border-blue-700 text-blue-200 text-sm flex items-center gap-2">
+                        <span>ℹ️</span> {{ message }}
+                    </div>
+                {% endfor %}
+            {% endwith %}
+
+            {% if not auth_configured %}
+                <div class="p-4 rounded-lg bg-yellow-900/40 border border-yellow-700 text-yellow-100 text-sm space-y-2">
+                    <p class="font-semibold flex items-center gap-2"><span>⚠️</span> Dashboard login is not configured</p>
+                    <p>
+                        Set <code class="bg-black/30 px-1 rounded">DASHBOARD_USER</code> and
+                        <code class="bg-black/30 px-1 rounded">DASHBOARD_PASSWORD</code> in the project
+                        <code class="bg-black/30 px-1 rounded">.env</code> file (or re-run
+                        <code class="bg-black/30 px-1 rounded">./install.sh</code>), then restart the dashboard.
+                    </p>
+                </div>
+            {% else %}
+                {% if error %}
+                    <div class="mb-4 p-3 rounded-lg bg-red-900/50 border border-red-700 text-red-200 text-sm flex items-center gap-2" role="alert">
+                        <span>❌</span> {{ error }}
+                    </div>
+                {% endif %}
+
+                <form method="post" action="{{ url_for('login') }}" class="space-y-5" autocomplete="on">
+                    <input type="hidden" name="next" value="{{ next_url }}">
+
+                    <div>
+                        <label for="username" class="block text-sm font-medium text-slate-300 mb-2">Username</label>
+                        <input type="text" id="username" name="username" value="{{ username }}"
+                               required autofocus autocapitalize="none" spellcheck="false" autocomplete="username"
+                               class="w-full px-4 py-3 rounded-lg bg-[#0f172a] border border-[#334155] text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                    </div>
+
+                    <div>
+                        <label for="password" class="block text-sm font-medium text-slate-300 mb-2">Password</label>
+                        <input type="password" id="password" name="password"
+                               required autocomplete="current-password"
+                               class="w-full px-4 py-3 rounded-lg bg-[#0f172a] border border-[#334155] text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                    </div>
+
+                    <button type="submit"
+                            class="w-full py-3 px-4 rounded-lg bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-colors flex items-center justify-center gap-2">
+                        <span>🔓</span> Sign in
+                    </button>
+                </form>
+            {% endif %}
+        </div>
+
+        <p class="text-center text-xs text-slate-500 mt-6">
+            Scripts can use HTTP Basic auth instead: <code class="bg-[#1e293b] px-1 rounded">curl -u user:pass …/healthz</code>
+        </p>
+    </main>
+
+</body>
+</html>

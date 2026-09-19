@@ -3,14 +3,15 @@
 # start.sh — Start the Telegram bot and the web dashboard together.
 #
 # If install.sh created a virtualenv (.venv), it is used automatically.
-# Settings from .env (DASHBOARD_HOST / DASHBOARD_PORT) are loaded if present.
+# Settings from .env (DASHBOARD_HOST / DASHBOARD_PORT / DASHBOARD_USER /
+# DASHBOARD_PASSWORD) are loaded if present.
 # ==============================================================================
 set -e
 cd "$(dirname "$0")"
 
 echo "🚀 Starting AutoRepost Pipeline..."
 
-# Load .env if present (DASHBOARD_HOST / DASHBOARD_PORT)
+# Load .env if present (dashboard host/port + login credentials)
 if [ -f ".env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -40,6 +41,12 @@ if [ ! -f "config.json" ]; then
   echo "⚠️  config.json not found!"
   echo "Run: cp config.example.json config.json  (or ./install.sh)"
   exit 1
+fi
+
+# The dashboard is password protected and fails closed without a password
+if [ -z "${DASHBOARD_PASSWORD:-}" ]; then
+  echo "⚠️  DASHBOARD_PASSWORD is not set — nobody will be able to log in to the dashboard."
+  echo "   Add DASHBOARD_USER / DASHBOARD_PASSWORD to .env (or re-run ./install.sh) and restart."
 fi
 
 # Ensure dependencies are importable
@@ -82,6 +89,7 @@ echo ""
 echo "✅ AutoRepost Pipeline is up!"
 echo "📱 Bot: $BOT_STATUS"
 echo "🌐 Dashboard: http://localhost:${DASHBOARD_PORT:-5000} (PID $DASH_PID)"
+echo "🔒 Dashboard login: ${DASHBOARD_USER:-admin} (password from .env)"
 echo ""
 echo "📋 Logs: tail -f logs/pipeline.log"
 echo "🛑 Press Ctrl+C to stop both services"

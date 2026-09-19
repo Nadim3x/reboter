@@ -13,7 +13,8 @@
 #   2. Creates a Python virtual environment and installs requirements.txt
 #   3. Creates downloads/ thumbnails/ logs/ and seeds config.json from the example
 #   4. Optionally saves your Telegram token + Zernio API key
-#   5. Optionally installs a systemd service so the pipeline runs 24/7
+#   5. Sets the dashboard login (DASHBOARD_USER / DASHBOARD_PASSWORD in .env)
+#   6. Optionally installs a systemd service so the pipeline runs 24/7
 #
 # Idempotent: safe to re-run — it upgrades dependencies instead of re-installing.
 # ==============================================================================
@@ -29,8 +30,13 @@ INSTALL_DIR=""
 REPO_URL="$DEFAULT_REPO_URL"
 ENV_TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}"
 ENV_ZERNIO_API_KEY="${ZERNIO_API_KEY:-}"
+ENV_DASHBOARD_USER="${DASHBOARD_USER:-}"
+ENV_DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD:-}"
 TELEGRAM_TOKEN=""
 ZERNIO_API_KEY=""
+DASHBOARD_USER=""
+DASHBOARD_PASSWORD=""
+GENERATED_PASSWORD=""   # set when this run invented the dashboard password
 NON_INTERACTIVE=0
 SKIP_SYSTEM_DEPS=0
 SKIP_VENV=0
@@ -67,6 +73,9 @@ Options:
                              or ~/AutoRepost-Pipeline when piped through curl)
   -t, --telegram-token TOK   Telegram bot token (skips the interactive prompt)
   -z, --zernio-key KEY       Zernio API key (skips the interactive prompt)
+  -u, --dashboard-user USER  Dashboard login username (default: admin)
+  -p, --dashboard-password P Dashboard login password (default: prompt, or
+                             auto-generate one and print it)
   -n, --non-interactive      Never prompt; use flags/env only
       --service              Install + enable a systemd service (starts on boot)
       --start                Start the pipeline (./start.sh) when finished
@@ -83,7 +92,13 @@ Environment variables:
   AUTOREPOST_DIR             Override the install directory
   TELEGRAM_TOKEN             Same as --telegram-token
   ZERNIO_API_KEY             Same as --zernio-key
+  DASHBOARD_USER             Same as --dashboard-user (stored in .env)
+  DASHBOARD_PASSWORD         Same as --dashboard-password (stored in .env)
   DASHBOARD_PORT             Dashboard port (default 5000, stored in .env)
+
+The dashboard is password protected. Credentials are written to the gitignored
+.env file (mode 600) together with a random DASHBOARD_SECRET_KEY used to sign
+login cookies. Re-running the installer keeps an existing password.
 EOF
 }
 
@@ -93,6 +108,8 @@ while [ $# -gt 0 ]; do
     -d|--dir)              INSTALL_DIR="${2:-}"; shift 2 ;;
     -t|--telegram-token)   TELEGRAM_TOKEN="${2:-}"; shift 2 ;;
     -z|--zernio-key)       ZERNIO_API_KEY="${2:-}"; shift 2 ;;
+    -u|--dashboard-user)   DASHBOARD_USER="${2:-}"; shift 2 ;;
+    -p|--dashboard-password) DASHBOARD_PASSWORD="${2:-}"; shift 2 ;;
     -n|--non-interactive)  NON_INTERACTIVE=1; shift ;;
     --service)             INSTALL_SERVICE=1; shift ;;
     --start)               START_AFTER=1; shift ;;
@@ -110,6 +127,8 @@ done
 # Flags win over env-provided credentials
 TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-$ENV_TELEGRAM_TOKEN}"
 ZERNIO_API_KEY="${ZERNIO_API_KEY:-$ENV_ZERNIO_API_KEY}"
+DASHBOARD_USER="${DASHBOARD_USER:-$ENV_DASHBOARD_USER}"
+DASHBOARD_PASSWORD="${DASHBOARD_PASSWORD:-$ENV_DASHBOARD_PASSWORD}"
 
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
@@ -386,6 +405,84 @@ prompt_tty() {
   printf -v "$__var" '%s' "$__value"
 }
 
+prompt_tty_secret() {
+  # Like prompt_tty, but without echoing what is typed (passwords).
+  local __var="$1" __prompt="$2" __value=""
+  if [ -r /dev/tty ]; then
+    printf '%s' "$__prompt" > /dev/tty
+    IFS= read -rs __value < /dev/tty || true
+    printf '\n' > /dev/tty
+  fi
+  printf -v "$__var" '%s' "$__value"
+}
+
+# --- .env helpers -------------------------------------------------------------
+# .env is sourced by start.sh (shell) *and* parsed by dashboard/app.py, so values
+# are written single-quoted whenever they contain anything but [A-Za-z0-9_./:-].
+
+env_quote() {
+  local value="$1" q="'" esc="'\\''"   # a literal ' inside single quotes becomes '\''
+  case "$value" in
+    ""|*[!A-Za-z0-9_./:-]*) printf "'%s'" "${value//$q/$esc}" ;;
+    *) printf '%s' "$value" ;;
+  esac
+}
+
+ensure_env_file() {
+  local env_path="$INSTALL_DIR/.env"
+  [ "$DRY_RUN" -eq 1 ] && return 0
+  if [ ! -f "$env_path" ]; then
+    {
+      echo "# AutoRepost Pipeline environment — created by install.sh"
+      echo "# Loaded by start.sh and dashboard/app.py. Keep this file private (it holds the dashboard login)."
+    } > "$env_path"
+  fi
+  chmod 600 "$env_path" 2>/dev/null || true
+}
+
+upsert_env_var() {
+  # upsert_env_var KEY VALUE — replace KEY=... in .env or append it.
+  local key="$1" value="$2" env_path="$INSTALL_DIR/.env" quoted tmp shown
+  if [ "$DRY_RUN" -eq 1 ]; then
+    shown="$value"
+    case "$key" in DASHBOARD_PASSWORD|DASHBOARD_SECRET_KEY) shown="********" ;; esac
+    printf '   %s[dry-run]%s .env: %s=%s\n' "$C_DIM" "$C_RESET" "$key" "$shown"
+    return 0
+  fi
+  ensure_env_file
+  quoted="$(env_quote "$value")"
+  tmp="$(mktemp "$INSTALL_DIR/.env.XXXXXX")"
+  # Drop any existing definition (plain or `export`ed), then append the new one
+  grep -vE "^(export[[:space:]]+)?${key}=" "$env_path" > "$tmp" || true
+  printf '%s=%s\n' "$key" "$quoted" >> "$tmp"
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$env_path"
+}
+
+read_env_var() {
+  # read_env_var KEY — print the (unquoted) value from .env, empty when missing.
+  local key="$1" env_path="$INSTALL_DIR/.env" raw="" q="'" esc="'\\''"
+  [ -f "$env_path" ] || return 0
+  raw="$(grep -E "^(export[[:space:]]+)?${key}=" "$env_path" 2>/dev/null | tail -n1 | sed -E "s/^(export[[:space:]]+)?${key}=//" || true)"
+  case "$raw" in
+    \'*\') raw="${raw#\'}"; raw="${raw%\'}"; printf '%s' "${raw//"$esc"/$q}" ;;
+    \"*\") raw="${raw#\"}"; printf '%s' "${raw%\"}" ;;
+    *) printf '%s' "${raw%% #*}" ;;
+  esac
+}
+
+generate_secret() {
+  # generate_secret NBYTES — random string safe to store unquoted in .env
+  local nbytes="${1:-24}"
+  if [ -n "${PYTHON_BIN:-}" ] && "$PYTHON_BIN" -c "import secrets" >/dev/null 2>&1; then
+    "$PYTHON_BIN" -c "import secrets,sys; print(secrets.token_urlsafe(int(sys.argv[1])))" "$nbytes"
+  elif have openssl; then
+    openssl rand -hex "$nbytes"
+  else
+    od -An -tx1 -N "$nbytes" /dev/urandom | tr -d ' \n'; echo
+  fi
+}
+
 is_placeholder() {
   case "${1:-}" in
     ""|YOUR_TELEGRAM_BOT_TOKEN|YOUR_ZERNIO_API_KEY) return 0 ;;
@@ -447,19 +544,76 @@ setup_config() {
 
   # Persist dashboard host/port so start.sh and the Flask app agree
   if [[ "${DASHBOARD_PORT:-5000}" =~ ^[0-9]+$ ]] && [ "${DASHBOARD_PORT:-5000}" != "5000" ]; then
-    write_env_file "$DASHBOARD_PORT"
+    upsert_env_var "DASHBOARD_HOST" "${DASHBOARD_HOST:-0.0.0.0}"
+    upsert_env_var "DASHBOARD_PORT" "$DASHBOARD_PORT"
+    ok "Wrote .env (dashboard port $DASHBOARD_PORT)"
   fi
 }
 
-write_env_file() {
-  local port="$1"
-  [ "$DRY_RUN" -eq 1 ] && return 0
-  {
-    echo "# AutoRepost Pipeline environment — created by install.sh"
-    echo "DASHBOARD_HOST=0.0.0.0"
-    echo "DASHBOARD_PORT=$port"
-  } > "$INSTALL_DIR/.env"
-  ok "Wrote .env (dashboard port $port)"
+# ==============================================================================
+# 4b. Dashboard login (DASHBOARD_USER / DASHBOARD_PASSWORD in .env)
+# ==============================================================================
+
+setup_dashboard_auth() {
+  step "Configuring dashboard login"
+
+  local existing_user existing_password
+  existing_user="$(read_env_var DASHBOARD_USER)"
+  existing_password="$(read_env_var DASHBOARD_PASSWORD)"
+
+  # Username: flag/env > existing .env > prompt > "admin"
+  if [ -z "$DASHBOARD_USER" ]; then
+    if [ -n "$existing_user" ]; then
+      DASHBOARD_USER="$existing_user"
+    elif [ "$NON_INTERACTIVE" -eq 0 ] && [ -r /dev/tty ] && [ -z "$existing_password" ]; then
+      prompt_tty DASHBOARD_USER "   Dashboard username [admin]: "
+    fi
+    DASHBOARD_USER="${DASHBOARD_USER:-admin}"
+  fi
+
+  # Password: flag/env > existing .env > prompt > generated
+  if [ -z "$DASHBOARD_PASSWORD" ]; then
+    if [ -n "$existing_password" ]; then
+      DASHBOARD_PASSWORD="$existing_password"
+      ok "Keeping the existing dashboard password from .env (user: $DASHBOARD_USER)"
+    else
+      if [ "$NON_INTERACTIVE" -eq 0 ] && [ -r /dev/tty ]; then
+        log "   The dashboard asks for this login whenever it is opened (also from other devices)."
+        log "   (Leave blank to generate a strong random password)"
+        local confirm=""
+        while :; do
+          prompt_tty_secret DASHBOARD_PASSWORD "   Dashboard password: "
+          [ -n "$DASHBOARD_PASSWORD" ] || break
+          prompt_tty_secret confirm "   Repeat password: "
+          [ "$DASHBOARD_PASSWORD" = "$confirm" ] && break
+          warn "Passwords did not match — try again"
+          DASHBOARD_PASSWORD=""
+        done
+      fi
+      if [ -z "$DASHBOARD_PASSWORD" ]; then
+        DASHBOARD_PASSWORD="$(generate_secret 18)"
+        GENERATED_PASSWORD="$DASHBOARD_PASSWORD"
+        ok "Generated a random dashboard password (shown at the end)"
+      fi
+    fi
+  fi
+
+  case "$DASHBOARD_PASSWORD" in
+    *[[:cntrl:]]*) die "The dashboard password must not contain control characters." ;;
+  esac
+  if [ "${#DASHBOARD_PASSWORD}" -lt 8 ]; then
+    warn "Dashboard password is shorter than 8 characters — consider a longer one for a public dashboard"
+  fi
+
+  upsert_env_var "DASHBOARD_USER" "$DASHBOARD_USER"
+  upsert_env_var "DASHBOARD_PASSWORD" "$DASHBOARD_PASSWORD"
+
+  # Cookie-signing secret: generate once, keep forever (so logins survive restarts)
+  if [ -z "$(read_env_var DASHBOARD_SECRET_KEY)" ]; then
+    upsert_env_var "DASHBOARD_SECRET_KEY" "$(generate_secret 32)"
+  fi
+
+  ok "Dashboard login saved to .env (user: $DASHBOARD_USER)"
 }
 
 # ==============================================================================
@@ -549,13 +703,14 @@ main() {
   setup_python_env
   setup_directories
   setup_config
+  setup_dashboard_auth
   install_service
   verify_install
 
   local port="${DASHBOARD_PORT:-}"
   if [ -f "$INSTALL_DIR/.env" ]; then
     local env_port
-    env_port="$(grep -E '^DASHBOARD_PORT=' "$INSTALL_DIR/.env" 2>/dev/null | cut -d= -f2 || true)"
+    env_port="$(read_env_var DASHBOARD_PORT)"
     port="${env_port:-$port}"
   fi
   port="${port:-5000}"
@@ -566,6 +721,12 @@ main() {
   log "  Project:    $INSTALL_DIR"
   log "  Python:     $PYTHON_BIN"
   log "  Dashboard:  http://localhost:$port   (Telegram token: $token_ok)"
+  if [ -n "$GENERATED_PASSWORD" ]; then
+    log "  Login:      user ${C_BOLD}${DASHBOARD_USER}${C_RESET}  password ${C_BOLD}${GENERATED_PASSWORD}${C_RESET}"
+    log "              (generated for you — also stored in $INSTALL_DIR/.env)"
+  else
+    log "  Login:      user ${DASHBOARD_USER:-admin}  (password stored in $INSTALL_DIR/.env)"
+  fi
   log "  Logs:       $INSTALL_DIR/logs/pipeline.log"
   printf '\n'
   log "  Next steps:"

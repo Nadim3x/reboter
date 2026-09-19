@@ -102,6 +102,15 @@
                 <div class="flex items-center gap-4">
                     <span class="text-sm text-slate-400">🌐 http://localhost:5000</span>
                     <div class="w-2 h-2 bg-green-500 rounded-full animate-pulse"></div>
+                    <span class="text-sm text-slate-400 border-l border-[#334155] pl-4">👤 {{ auth_user }}</span>
+                    {% if auth_method == 'session' %}
+                    <form method="post" action="{{ url_for('logout') }}">
+                        <button type="submit"
+                                class="text-sm px-3 py-1.5 rounded-lg bg-[#334155] hover:bg-[#475569] text-slate-200 transition-colors">
+                            Logout
+                        </button>
+                    </form>
+                    {% endif %}
                 </div>
             </div>
         </header>

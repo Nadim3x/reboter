@@ -1,6 +1,6 @@
 # 🎬 AutoRepost Pipeline
 
-An automated video reposting pipeline that receives video links via Telegram, downloads them using `yt-dlp`, and reposts them to Instagram & TikTok via Zernio API. Includes a local web dashboard for managing settings, thumbnails, captions, and logs.
+An automated video reposting pipeline that receives video links via Telegram, downloads them using `yt-dlp`, and reposts them to Instagram & TikTok via Zernio API. Includes a password-protected web dashboard for managing settings, thumbnails, captions, and logs.
 
 ## Features
 
@@ -10,8 +10,9 @@ An automated video reposting pipeline that receives video links via Telegram, do
 - 🖼️ **Thumbnail Management** — Default thumbnail applied to every post, managed via dashboard
 - 🚀 **Multi-Platform Upload** — Posts to Instagram & TikTok via Zernio API
 - 🌐 **Web Dashboard** — Manage tokens, thumbnails, captions, and view logs at `http://localhost:5000`
+- 🔒 **Dashboard Login** — Password protected (login page + HTTP Basic auth) so it can be exposed remotely; failed logins are logged
 - 🛠️ **One-Command Install** — `./install.sh` handles deps, virtualenv, config and an optional systemd service
-- 🩺 **Health Endpoint** — `GET /healthz` reports whether the bot is actually alive
+- 🩺 **Health Endpoint** — `GET /healthz` is public for uptime checks; details (bot alive, tokens set) only with credentials
 - 📜 **Logging** — Full pipeline logging to `logs/pipeline.log`
 
 ## Requirements
@@ -130,14 +131,40 @@ process actually stayed alive — so a bad token or offline network is obvious i
 
 ### Configuration via `.env`
 
-`install.sh` writes `.env` when you choose a non-default dashboard port. Any of these
-are picked up by both the dashboard and `start.sh` (and can be set yourself):
+`install.sh` writes `.env` (mode 600) with the dashboard login and, if you chose one,
+a non-default port. Any of these are picked up by both the dashboard and `start.sh`
+(see `.env.example`; values with spaces or shell characters go in single quotes):
 
 ```bash
-DASHBOARD_HOST=0.0.0.0   # bind address for the Flask dashboard
-DASHBOARD_PORT=5000      # port (also used for previews/proxies)
-FLASK_SECRET_KEY=...     # override the default flash-message secret
+DASHBOARD_HOST=0.0.0.0          # bind address for the Flask dashboard
+DASHBOARD_PORT=5000             # port (also used for previews/proxies)
+DASHBOARD_USER=admin            # dashboard login
+DASHBOARD_PASSWORD='s3cret'     # required — without it nobody can log in
+DASHBOARD_SECRET_KEY=...        # signs login cookies (installer generates it)
+DASHBOARD_SESSION_HOURS=12      # optional: how long a browser login lasts
+DASHBOARD_TRUST_PROXY=1         # optional: behind nginx/Caddy/Cloudflare Tunnel
+DASHBOARD_COOKIE_SECURE=1       # optional: cookie only over HTTPS
 ```
+
+### Dashboard login & remote access
+
+Every dashboard page requires a login; `/healthz` is the only public route.
+
+- **Browser** — you are sent to `/login`. A correct password sets an HMAC-signed,
+  HttpOnly session cookie (12 h by default). *Logout* is in the top bar.
+- **Scripts / uptime checks** — send HTTP Basic auth instead:
+  `curl -u admin:s3cret http://host:5000/healthz`
+- **Failed logins** are written to `logs/pipeline.log` (with the client IP), e.g.
+  `2026-09-19 12:00:00 | WARNING | Dashboard login FAILED | user 'admin' from 203.0.113.9 via form`
+  — handy for fail2ban.
+- **Changing the password** (edit `.env`, restart) invalidates all existing logins.
+- **Forgot the password?** It is stored in plain text in `.env`; re-run `./install.sh -p NEWPASS`
+  (or edit the file) and restart.
+
+Credentials are never committed: `.env` is gitignored, and `config.json` does not hold them.
+If you expose the dashboard on the internet, put it behind HTTPS (reverse proxy or a
+tunnel) and set `DASHBOARD_TRUST_PROXY=1` — Basic auth and cookies are only as private as
+the connection they travel over.
 
 ### 24/7 with systemd
 
@@ -211,7 +238,8 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 ├── install.sh             # One-command installer (deps, venv, config, systemd)
 ├── uninstall.sh           # Removes service + venv (--purge also deletes data)
 ├── start.sh               # Start both bot & dashboard
-├── .env                   # Optional: DASHBOARD_HOST / DASHBOARD_PORT (gitignored)
+├── .env                   # Dashboard login + host/port (gitignored, written by install.sh)
+├── .env.example           # Template for .env
 ├── downloads/             # Temp video storage (gitignored)
 ├── thumbnails/            # Thumbnail images (gitignored *.jpg/*.png)
 ├── logs/                  # Pipeline logs (gitignored)
@@ -219,6 +247,7 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
     ├── app.py             # Flask dashboard
     └── templates/
         ├── base.html
+        ├── login.html
         ├── index.html
         ├── settings.html
         ├── thumbnails.html
@@ -228,10 +257,14 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 
 ## Dashboard Routes
 
+All routes require a login (session cookie or HTTP Basic auth) except `/healthz`, `/login` and `/logout`.
+
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/` | GET | Dashboard home with recent activity |
-| `/healthz` | GET | JSON health check (bot alive, tokens configured, caption count) |
+| `/login` | GET/POST | Login page (sets the session cookie) |
+| `/logout` | POST | Clear the session cookie |
+| `/healthz` | GET | Public: `{"status":"ok","auth_required":true}` — with credentials also bot alive, tokens configured, caption count |
 | `/settings` | GET/POST | Manage Telegram token & Zernio API key |
 | `/thumbnails` | GET | List thumbnails & current default |
 | `/thumbnails/upload` | POST | Upload new thumbnail |
@@ -276,7 +309,9 @@ MIT License - feel free to use and modify.
 
 **Dashboard not loading images** — Ensure thumbnails folder exists and Flask has read permission.
 
-**Bot not responding** — Check `logs/pipeline.log` and verify the Telegram token is correct. `curl localhost:5000/healthz` shows `bot_running: true/false`.
+**Bot not responding** — Check `logs/pipeline.log` and verify the Telegram token is correct. `curl -u admin:PASSWORD localhost:5000/healthz` shows `bot_running: true/false` (without credentials `/healthz` only reports `status` and `auth_required`).
+
+**Dashboard says "login is not configured" / can't log in** — `DASHBOARD_PASSWORD` is missing from `.env`. Run `./install.sh` again (it prompts, or generates one) or add `DASHBOARD_USER=…` / `DASHBOARD_PASSWORD='…'` yourself, then restart. Failed attempts are listed in `logs/pipeline.log`.
 
 **Dashboard port already in use** — Set another port: `DASHBOARD_PORT=5050 ./start.sh` (the installer can also write it to `.env`).
 
