@@ -9,6 +9,7 @@ Uses python-telegram-bot v20+ async style.
 
 import re
 import os
+import atexit
 import asyncio
 import logging
 import traceback
@@ -411,6 +412,29 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # Main Bot Runner
 # ------------------------------------------------------------------------------
 
+PID_FILE = os.path.join(LOG_DIR, "bot.pid")
+
+
+def write_pid_file() -> None:
+    """Record our PID so the dashboard can show a real 'bot running' status."""
+    try:
+        with open(PID_FILE, "w", encoding="utf-8") as fh:
+            fh.write(str(os.getpid()))
+    except Exception as e:
+        logger.warning(f"Could not write PID file {PID_FILE}: {e}")
+
+
+def remove_pid_file() -> None:
+    """Remove the PID file on clean shutdown (only if it is ours)."""
+    try:
+        if os.path.exists(PID_FILE):
+            with open(PID_FILE, "r", encoding="utf-8") as fh:
+                if fh.read().strip() == str(os.getpid()):
+                    os.remove(PID_FILE)
+    except Exception:
+        pass
+
+
 def main() -> None:
     """Start the Telegram bot."""
     print("🚀 Starting AutoRepost Telegram Bot...")
@@ -440,8 +464,15 @@ def main() -> None:
     print("✅ Bot is running! Press Ctrl+C to stop.")
     logger.info("Bot started")
 
+    # Track our PID for the dashboard's health check
+    write_pid_file()
+    atexit.register(remove_pid_file)
+
     # Run polling (blocking)
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        application.run_polling(allowed_updates=Update.ALL_TYPES)
+    finally:
+        remove_pid_file()
 
 
 if __name__ == "__main__":

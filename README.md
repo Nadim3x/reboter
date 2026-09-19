@@ -10,6 +10,8 @@ An automated video reposting pipeline that receives video links via Telegram, do
 - 🖼️ **Thumbnail Management** — Default thumbnail applied to every post, managed via dashboard
 - 🚀 **Multi-Platform Upload** — Posts to Instagram & TikTok via Zernio API
 - 🌐 **Web Dashboard** — Manage tokens, thumbnails, captions, and view logs at `http://localhost:5000`
+- 🛠️ **One-Command Install** — `./install.sh` handles deps, virtualenv, config and an optional systemd service
+- 🩺 **Health Endpoint** — `GET /healthz` reports whether the bot is actually alive
 - 📜 **Logging** — Full pipeline logging to `logs/pipeline.log`
 
 ## Requirements
@@ -32,15 +34,59 @@ sudo apt update && sudo apt install ffmpeg
 
 ## Installation
 
+### One command (recommended)
+
 ```bash
-# Clone the repo
+git clone https://github.com/Nadim3x/reboter.git && cd reboter && ./install.sh
+```
+
+The installer is idempotent (safe to re-run) and does everything:
+
+1. Installs system dependencies — `ffmpeg` + Python 3.10+ — via `apk` / `apt` / `dnf` / `pacman` / `zypper` / `brew`
+2. Creates a virtualenv in `.venv/` and installs `requirements.txt`
+3. Creates `downloads/`, `thumbnails/`, `logs/` and seeds `config.json` from the example
+4. Prompts for your Telegram token and Zernio API key (writes them into `config.json`)
+5. Verifies the install (imports + syntax check on every module)
+6. Optionally installs a **systemd service** so the pipeline survives reboots
+
+Then start it:
+
+```bash
+./start.sh
+```
+
+**Non-interactive / automation:**
+
+```bash
+./install.sh -n --telegram-token "123:ABC..." --zernio-key "zern_..." --service --start
+```
+
+| Flag | Purpose |
+|------|---------|
+| `-d, --dir DIR` | Install/clone directory (default: the checkout you ran it from) |
+| `-t, --telegram-token TOK` | Telegram bot token (or env `TELEGRAM_TOKEN`) |
+| `-z, --zernio-key KEY` | Zernio API key (or env `ZERNIO_API_KEY`) |
+| `-n, --non-interactive` | Never prompt (for CI/containers) |
+| `--service` | Install + enable a systemd service (`systemctl status autorepost`) |
+| `--start` | Run `./start.sh` when the install finishes |
+| `--skip-system-deps` | Don't touch the OS package manager |
+| `--skip-venv` | Install with `pip --user` instead of a virtualenv |
+| `--skip-update` | Don't `git pull` an existing checkout |
+| `--repo-url URL` | Remote to clone when run outside a checkout |
+| `--dry-run` | Show what would happen, change nothing |
+
+Full flag list: `./install.sh --help`. Uninstall: `./uninstall.sh` (add `--purge` to also delete config, thumbnails and logs).
+
+> Running from a clone is recommended. The `curl -fsSL <raw-install-url> | bash` form works too — it clones the repo to `~/AutoRepost-Pipeline` — but only for public repos.
+
+### Manual install
+
+```bash
 git clone <your-repo-url>
 cd AutoRepost-Pipeline
 
-# Install Python dependencies
-pip install -r requirements.txt
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt   # or: pip install -r requirements.txt
 
-# Create required directories (if not present)
 mkdir -p downloads thumbnails logs
 ```
 
@@ -76,8 +122,33 @@ cp config.example.json config.json
 Use the start script (starts both bot and dashboard):
 
 ```bash
-bash start.sh
+./start.sh
 ```
+
+`start.sh` auto-detects `.venv/`, loads `.env` if present, and reports whether the bot
+process actually stayed alive — so a bad token or offline network is obvious immediately.
+
+### Configuration via `.env`
+
+`install.sh` writes `.env` when you choose a non-default dashboard port. Any of these
+are picked up by both the dashboard and `start.sh` (and can be set yourself):
+
+```bash
+DASHBOARD_HOST=0.0.0.0   # bind address for the Flask dashboard
+DASHBOARD_PORT=5000      # port (also used for previews/proxies)
+FLASK_SECRET_KEY=...     # override the default flash-message secret
+```
+
+### 24/7 with systemd
+
+```bash
+./install.sh --service          # installs, enables and starts autorepost.service
+systemctl status autorepost     # check
+journalctl -u autorepost -f     # follow logs
+```
+
+Without root, the installer falls back to a user service (`systemctl --user`) and
+reminds you to run `loginctl enable-linger $USER`.
 
 Or run manually in two terminals:
 
@@ -137,7 +208,10 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 ├── config.json            # Your secrets (gitignored)
 ├── config.example.json    # Template config
 ├── requirements.txt
+├── install.sh             # One-command installer (deps, venv, config, systemd)
+├── uninstall.sh           # Removes service + venv (--purge also deletes data)
 ├── start.sh               # Start both bot & dashboard
+├── .env                   # Optional: DASHBOARD_HOST / DASHBOARD_PORT (gitignored)
 ├── downloads/             # Temp video storage (gitignored)
 ├── thumbnails/            # Thumbnail images (gitignored *.jpg/*.png)
 ├── logs/                  # Pipeline logs (gitignored)
@@ -157,6 +231,7 @@ Supported formats: `.jpg`, `.jpeg`, `.png`, `.webp`
 | Route | Method | Description |
 |-------|--------|-------------|
 | `/` | GET | Dashboard home with recent activity |
+| `/healthz` | GET | JSON health check (bot alive, tokens configured, caption count) |
 | `/settings` | GET/POST | Manage Telegram token & Zernio API key |
 | `/thumbnails` | GET | List thumbnails & current default |
 | `/thumbnails/upload` | POST | Upload new thumbnail |
@@ -201,4 +276,10 @@ MIT License - feel free to use and modify.
 
 **Dashboard not loading images** — Ensure thumbnails folder exists and Flask has read permission.
 
-**Bot not responding** — Check `logs/pipeline.log` and verify Telegram token is correct.
+**Bot not responding** — Check `logs/pipeline.log` and verify the Telegram token is correct. `curl localhost:5000/healthz` shows `bot_running: true/false`.
+
+**Dashboard port already in use** — Set another port: `DASHBOARD_PORT=5050 ./start.sh` (the installer can also write it to `.env`).
+
+**Service won't start** — `journalctl -u autorepost -n 50 --no-pager`. Most often it is a missing token in `config.json`.
+
+**Reinstalling / weird environment** — Re-run `./install.sh` (it is idempotent) or wipe the venv with `./uninstall.sh`.
